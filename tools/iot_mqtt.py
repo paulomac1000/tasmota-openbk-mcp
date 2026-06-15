@@ -38,8 +38,11 @@ def _get_mqtt_client() -> Any:
         try:
             # paho-mqtt >= 2.0 requires callback_api_version
             CallbackAPIVersion = getattr(mqtt, "CallbackAPIVersion")
-            client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION1)
-        except (AttributeError, TypeError):
+            client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION1)  # type: ignore[call-arg]
+        except AttributeError:
+            # paho-mqtt < 2.0
+            client = mqtt.Client()
+        except TypeError:
             # paho-mqtt < 2.0
             client = mqtt.Client()
 
@@ -143,9 +146,45 @@ def _mqtt_get_state(topic_prefix: str, timeout_seconds: int = 10) -> str:
             pass
 
     if not received_messages:
+        # Check if device has any active GPIO channels
+        try:
+            from tools.iot_devices import _get_device_info
+            from tools.iot_discovery import _resolve_ip
+
+            ip = _resolve_ip(topic_prefix)
+            if ip:
+                info_str = _get_device_info(topic_prefix)
+                info = json.loads(info_str) if isinstance(info_str, str) else info_str
+                if info.get("success"):
+                    dev_info = info.get("data", info).get("info", info.get("data", {}))
+                    channels = dev_info.get("channels", 1)
+                    has_no_channels = (
+                        channels == 0
+                        or (isinstance(channels, list) and len(channels) == 0)
+                        or (isinstance(channels, dict) and len(channels) == 0)
+                    )
+                    if has_no_channels:
+                        return _success_response(
+                            {
+                                "state": "unknown",
+                                "reason": "no_active_channels",
+                                "message": (
+                                    "Device is connected to MQTT but has no GPIO channels "
+                                    "configured. State topics are not published for "
+                                    "channel-less devices."
+                                ),
+                            }
+                        )
+        except Exception:
+            pass
+
         return _error_response_extended(
             code="TIMEOUT",
             message="No state message received within timeout",
+            suggestion=(
+                "Device may be connected to MQTT but not publishing state. "
+                "Use iot_get_device_info to check if GPIO channels are configured."
+            ),
         )
 
     latest = received_messages[-1]

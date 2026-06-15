@@ -1,0 +1,76 @@
+# .pre-commit-config.yaml — local-home-devices-mcp
+#
+# Hooks mirror CI lint+test jobs exactly (PRECOMMIT-01).
+# Only unit tests at pre-commit stage; integration tests at pre-push (PRECOMMIT-07).
+#
+# Generated from: pre-commit-mcp.j2 template (pre-commit-architect skill)
+
+fail_fast: false
+
+repos:
+  # ── Remote: basic file hygiene ──
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+      - id: detect-private-key
+
+  # ── Local: lint → format → types → security (mirrors CI lint job) ──
+  - repo: local
+    hooks:
+      - id: ruff-check
+        name: ruff check
+        entry: python3 -m ruff check tools/ server.py tests/
+        language: python
+        additional_dependencies: ["ruff>=0.11.0"]
+        pass_filenames: false
+
+      - id: ruff-format
+        name: ruff format --check
+        entry: python3 -m ruff format --check tools/ server.py tests/
+        language: python
+        additional_dependencies: ["ruff>=0.11.0"]
+        pass_filenames: false
+
+      - id: mypy
+        name: mypy
+        entry: python3 -m mypy tools/ --strict --no-warn-unused-ignores
+        language: python
+        additional_dependencies: ["mypy>=1.0", "types-PyYAML", "paho-mqtt>=2.0"]
+        pass_filenames: false
+
+      - id: bandit
+        name: bandit
+        entry: python3 -m bandit -r tools/ -ll
+        language: python
+        additional_dependencies: ["bandit[toml]>=1.7"]
+        pass_filenames: false
+
+      - id: pytest
+        name: pytest
+        entry: bash -c 'python3 -m pytest tests/unit/ -q 2>&1; if [ ${PIPESTATUS[0]} -ne 0 ]; then exit 1; fi'
+        language: system
+        pass_filenames: false
+
+  # ── Local: MCP-specific hooks ──
+  - repo: local
+    hooks:
+      - id: tool-count-validate
+        name: tool count validate
+        entry: |
+          python3 -c "
+          import subprocess, re
+          result = subprocess.run(
+              ['grep', '-rh', '@mcp.tool', 'tools/'],
+              capture_output=True, text=True
+          )
+          count = len([l for l in result.stdout.split('\n') if l.strip()])
+          assert count == 67, f'Expected 67 tools, got {count}'
+          print(f'Tool count OK: {count}')
+          "
+        language: python
+        pass_filenames: false

@@ -87,6 +87,7 @@ def mcp_client():
 
     from fastmcp import FastMCP
 
+    from tools.iot_config import register_iot_config_tools
     from tools.iot_control import register_iot_control_tools
     from tools.iot_devices import register_iot_device_tools
     from tools.iot_discovery import register_iot_discovery_tools
@@ -100,6 +101,7 @@ def mcp_client():
     with patch("tools.constants.ENABLE_WRITE_OPERATIONS", True):
         mcp = FastMCP("IoT-Integration-Test")
 
+        register_iot_config_tools(mcp)
         register_iot_device_tools(mcp)
         register_iot_discovery_tools(mcp)
         register_iot_control_tools(mcp)

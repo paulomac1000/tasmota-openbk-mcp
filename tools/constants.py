@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import threading
+import time
 import uuid
 from typing import Any
 
@@ -24,6 +25,10 @@ NETWORK_RANGE = os.getenv("NETWORK_RANGE")
 MCP_SSE_PORT = int(os.getenv("MCP_SSE_PORT", "9101"))
 REST_API_PORT = int(os.getenv("REST_API_PORT", "9102"))
 
+# Streamable HTTP transport
+MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "both")  # streamable-http, sse, both
+MCP_ALLOWED_ORIGINS = os.getenv("MCP_ALLOWED_ORIGINS", "http://localhost:*")
+
 HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "9100"))
 OPENHASP_DEFAULT_HOST = os.getenv("OPENHASP_DEFAULT_HOST", "192.168.1.100")
 OPENHASP_HTTP_PORT = int(os.getenv("OPENHASP_HTTP_PORT", "80"))
@@ -35,6 +40,14 @@ HIKVISION_DOORBELL_USER = os.getenv("HIKVISION_DOORBELL_USER", "")
 HIKVISION_DOORBELL_PASSWORD = os.getenv("HIKVISION_DOORBELL_PASSWORD", "")
 HIKVISION_CONTAINER_NAME = os.getenv("HIKVISION_CONTAINER_NAME", "hikvision-doorbell")
 DOCKER_SOCKET = os.getenv("DOCKER_SOCKET", "/var/run/docker.sock")
+DOCKER_TOOL_NAMES: list[str] = [
+    "hikvision_container_status",
+    "hikvision_container_logs",
+    "hikvision_check_vmd",
+    "hikvision_restart_container",
+    "hikvision_isapi_health",
+    "hikvision_pipeline_diagnose",
+]
 CAMERA_GATE_SNAPSHOTS_DIR = os.getenv(
     "CAMERA_GATE_SNAPSHOTS_DIR",
     "/config/www/archive/camera_gate",
@@ -57,13 +70,16 @@ ENABLE_WRITE_OPERATIONS = os.getenv("ENABLE_WRITE_OPERATIONS", "0") == "1"
 _DEFAULT_OCTETS = START_IP.rsplit(".", 1)[0]
 DEFAULT_NETWORK_RANGE = NETWORK_RANGE or f"{_DEFAULT_OCTETS}.0/24"
 
-TOOLS_VERSION = "1.4.0"
+TOOLS_VERSION = "1.6.0"
+
+DEFAULT_HA_DISCOVERY_PREFIX = "homeassistant"
 
 # =============================================================================
 # TOOL INVOCATION COUNTERS
 # =============================================================================
 
 _tool_invocation_counts: dict[str, int] = collections.defaultdict(int)
+_counter_lock = threading.Lock()
 
 
 def increment_tool_count(tool_name: str) -> None:
@@ -72,7 +88,8 @@ def increment_tool_count(tool_name: str) -> None:
     Args:
         tool_name: Name of the registered tool.
     """
-    _tool_invocation_counts[tool_name] += 1
+    with _counter_lock:
+        _tool_invocation_counts[tool_name] += 1
 
 
 def get_tool_counts() -> dict[str, int]:
@@ -81,7 +98,17 @@ def get_tool_counts() -> dict[str, int]:
     Returns:
         Dict mapping tool names to invocation counts.
     """
-    return dict(_tool_invocation_counts)
+    with _counter_lock:
+        return dict(_tool_invocation_counts)
+
+
+def record_invocation(tool_name: str) -> None:
+    """Record a tool invocation for health endpoint metrics.
+
+    Args:
+        tool_name: Name of the tool being invoked.
+    """
+    increment_tool_count(tool_name)
 
 
 # =============================================================================
@@ -317,6 +344,28 @@ def _build_meta(
     return meta
 
 
+def build_meta(tool_name: str, start_time: float | None = None, **extra: Any) -> dict[str, Any]:
+    """Build _meta envelope and record the invocation.
+
+    Wraps _build_meta() and adds invocation recording as a side effect.
+    The request_id is read from the current tool context so it matches
+    log lines for the same invocation.
+
+    Args:
+        tool_name: Tool name for invocation counting.
+        start_time: Optional time.monotonic() timestamp for duration_ms.
+        extra: Additional metadata fields.
+
+    Returns:
+        Dictionary with request_id, tool_version and extra fields.
+    """
+    record_invocation(tool_name)
+    duration_ms = None
+    if start_time is not None:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+    return _build_meta(duration_ms=duration_ms, **extra)
+
+
 def _success_response(
     data: Any,
     duration_ms: int | None = None,
@@ -421,6 +470,36 @@ def _error_response_extended(
             ),
         }
     )
+
+
+def _error_dict_extended(
+    code: str,
+    message: str,
+    retryable: bool = False,
+    suggestion: str | None = None,
+    available_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Return an error dict for internal function composition (before JSON serialization).
+
+    Unlike _error_response_extended which returns a JSON string, this variant
+    returns a dict suitable for composing with other dicts before serialization.
+
+    Args:
+        code: Machine-readable error code (UPPER_SNAKE_CASE).
+        message: Human-readable error description.
+        retryable: Whether the operation can be safely retried.
+        suggestion: Actionable next step for the user.
+        available_names: List of valid alternatives when relevant.
+
+    Returns:
+        Dict with success=False and error details.
+    """
+    error: dict[str, Any] = {"code": code, "message": message, "retryable": retryable}
+    if suggestion:
+        error["suggestion"] = suggestion
+    if available_names:
+        error["available_names"] = available_names[:50]
+    return {"success": False, "error": error}
 
 
 # =============================================================================
@@ -585,7 +664,18 @@ TOOL_MANIFESTS: dict[str, dict[str, Any]] = {
         cost="cheap",
         determinism="eventually-consistent",
     ),
+    "iot_execute_command": {
+        **_make_destructive_manifest("iot_execute_command", timeout_ms=10000, latency="slow"),
+        "description": "Execute raw /cm?cmnd command with blocked-command allowlist for safety",
+    },
     "iot_check_device": _make_manifest("iot_check_device", timeout_ms=10000),
+    "iot_configure_mqtt": {
+        **_make_write_manifest("iot_configure_mqtt", timeout_ms=10000),
+        "description": (
+            "Configure MQTT broker connection settings "
+            "(host, port, client, group) via /cfg_mqtt_set"
+        ),
+    },
     "iot_find_device_by_name": _make_manifest(
         "iot_find_device_by_name",
         timeout_ms=1000,
@@ -593,6 +683,14 @@ TOOL_MANIFESTS: dict[str, dict[str, Any]] = {
         cost="cheap",
         determinism="deterministic",
     ),
+    "iot_get_full_info": {
+        **_make_manifest(
+            "iot_get_full_info", timeout_ms=10000, latency="moderate", privacy="metadata"
+        ),
+        "description": (
+            "Get comprehensive device info (MAC, firmware version, flags, MQTT, WiFi) from Status 0"
+        ),
+    },
     "iot_get_device_info": _make_manifest(
         "iot_get_device_info",
         timeout_ms=10000,
@@ -605,12 +703,35 @@ TOOL_MANIFESTS: dict[str, dict[str, Any]] = {
         privacy="metadata",
     ),
     "iot_set_power": _make_write_manifest("iot_set_power", timeout_ms=10000),
+    "iot_set_startup_command": {
+        **_make_write_manifest("iot_set_startup_command", timeout_ms=10000),
+        "description": "Set device startup command / autoexec on OpenBK via /startup_command",
+    },
     "iot_set_brightness": _make_write_manifest("iot_set_brightness", timeout_ms=10000),
     "iot_restart_device": _make_destructive_manifest(
         "iot_restart_device",
         timeout_ms=10000,
         latency="slow",
     ),
+    "iot_set_flags": {
+        **_make_write_manifest("iot_set_flags", timeout_ms=10000),
+        "description": (
+            "Set device configuration flags (64-bit bitfield) "
+            "via /cfg_generic or /cm?cmnd=SetOption"
+        ),
+    },
+    "iot_set_friendly_name": {
+        **_make_write_manifest("iot_set_friendly_name", timeout_ms=10000),
+        "description": "Set device friendly name (FriendlyName1) on Tasmota devices",
+    },
+    "iot_set_gpio": {
+        **_make_write_manifest("iot_set_gpio", timeout_ms=10000),
+        "description": "Configure GPIO pin role and channel on device via /cfg_pins",
+    },
+    "iot_set_name": {
+        **_make_write_manifest("iot_set_name", timeout_ms=10000),
+        "description": "Set device short and full name via /cfg_name",
+    },
     "iot_mqtt_publish": _make_write_manifest("iot_mqtt_publish", timeout_ms=5000),
     "iot_mqtt_get_state": _make_manifest("iot_mqtt_get_state", timeout_ms=10000),
     "iot_mqtt_build_command_topic": _make_manifest(
@@ -621,6 +742,10 @@ TOOL_MANIFESTS: dict[str, dict[str, Any]] = {
         determinism="deterministic",
         side_effects="none",
     ),
+    "iot_start_ha_discovery": {
+        **_make_write_manifest("iot_start_ha_discovery", timeout_ms=10000),
+        "description": "Trigger Home Assistant MQTT discovery on device via /ha_discovery",
+    },
     "describe_iot_capabilities": _make_manifest(
         "describe_iot_capabilities",
         timeout_ms=100,

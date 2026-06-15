@@ -408,9 +408,14 @@ def _get_wifi_config(identifier: str, timeout_seconds: int = 10) -> str:
                 "resolved_from": identifier,
                 "ip": ip_address,
                 "wifi": {
+                    "ssid": info.get("ssid"),
                     "rssi": info.get("rssi"),
-                    "signal_quality": info.get("signal_quality"),
+                    "signal": info.get("signal"),
                     "mac": info.get("mac"),
+                    "ip": info.get("ip"),
+                    "gateway": info.get("gateway"),
+                    "hostname": info.get("hostname"),
+                    "dns": info.get("dns"),
                 },
             }
         )

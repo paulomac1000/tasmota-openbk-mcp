@@ -651,12 +651,50 @@ class TestHikvisionToolRegistration:
     def mcp(self, mock_mcp):
         from tools.iot_hikvision import register_hikvision_tools
 
-        register_hikvision_tools(mock_mcp)
+        with patch("tools.iot_hikvision._docker_available", return_value=True):
+            register_hikvision_tools(mock_mcp)
         return mock_mcp
 
     def test_all_fourteen_tools_registered(self, mcp):
         hik_tools = [n for n in mcp._tools if n.startswith("hikvision_")]
         assert len(hik_tools) == 14
+
+    def test_eight_isapi_tools_when_docker_unavailable(self):
+        from tools.iot_hikvision import register_hikvision_tools
+
+        mcp = MagicMock()
+        mcp._tools = {}
+
+        def tool_decorator(*args, **kwargs):
+            def wrapper(func):
+                tool_name = kwargs.get("name", func.__name__)
+                mcp._tools[tool_name] = func
+                return func
+
+            if len(args) == 1 and callable(args[0]) and not kwargs:
+                mcp._tools[args[0].__name__] = args[0]
+                return args[0]
+
+            return wrapper
+
+        mcp.tool = tool_decorator
+        mcp.get_tool = lambda name: mcp._tools.get(name)
+
+        with patch("tools.iot_hikvision._docker_available", return_value=False):
+            register_hikvision_tools(mcp)
+
+        hik_tools = [n for n in mcp._tools if n.startswith("hikvision_")]
+        assert len(hik_tools) == 8
+        # Docker tools must NOT be registered
+        assert "hikvision_container_status" not in mcp._tools
+        assert "hikvision_container_logs" not in mcp._tools
+        assert "hikvision_check_vmd" not in mcp._tools
+        assert "hikvision_restart_container" not in mcp._tools
+        assert "hikvision_isapi_health" not in mcp._tools
+        assert "hikvision_pipeline_diagnose" not in mcp._tools
+        # ISAPI tools must be registered
+        assert "hikvision_take_snapshot" in mcp._tools
+        assert "hikvision_device_info" in mcp._tools
 
     def test_container_status_tool(self, mcp):
         with patch(
@@ -922,3 +960,390 @@ class TestHikvisionISAPIClientDeep:
             assert result["saved"] is False
             assert "error" in result
             assert "Failed to capture" in result["error"]
+
+
+class TestHikvisionErrorPaths:
+    """Error-path tests for Hikvision tool functions to hit uncovered branches."""
+
+    # _hikvision_device_info error paths
+
+    def test_device_info_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_device_info
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_device_info.return_value = None
+            mock_create.return_value = mock_client
+            result = _hikvision_device_info()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_device_info_internal_error(self):
+        from tools.iot_hikvision import _hikvision_device_info
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("network timeout")
+            result = _hikvision_device_info()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_take_snapshot error paths
+
+    def test_take_snapshot_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_take_snapshot
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_snapshot.return_value = None
+            mock_create.return_value = mock_client
+            result = _hikvision_take_snapshot()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_take_snapshot_internal_error(self):
+        from tools.iot_hikvision import _hikvision_take_snapshot
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("socket timeout")
+            result = _hikvision_take_snapshot()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_open_gate error paths
+
+    def test_open_gate_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_open_gate
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.open_door.return_value = False
+            mock_create.return_value = mock_client
+            result = _hikvision_open_gate(door_id=1)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_open_gate_missing_creds(self):
+        from tools.iot_hikvision import _hikvision_open_gate
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = ValueError("Missing creds")
+            result = _hikvision_open_gate(door_id=1)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_open_gate_internal_error(self):
+        from tools.iot_hikvision import _hikvision_open_gate
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("connection refused")
+            result = _hikvision_open_gate(door_id=1)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_get_motion_config error paths
+
+    def test_get_motion_config_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_get_motion_config
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_motion_config.return_value = None
+            mock_create.return_value = mock_client
+            result = _hikvision_get_motion_config()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_get_motion_config_internal_error(self):
+        from tools.iot_hikvision import _hikvision_get_motion_config
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("ISAPI down")
+            result = _hikvision_get_motion_config()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_set_motion_detection error paths
+
+    def test_set_motion_detection_sensitivity_negative(self):
+        from tools.iot_hikvision import _hikvision_set_motion_detection
+
+        with patch("tools.iot_hikvision.create_isapi_client"):
+            result = _hikvision_set_motion_detection(sensitivity=-1)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_set_motion_detection_sensitivity_too_high(self):
+        from tools.iot_hikvision import _hikvision_set_motion_detection
+
+        with patch("tools.iot_hikvision.create_isapi_client"):
+            result = _hikvision_set_motion_detection(sensitivity=101)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_set_motion_detection_missing_creds(self):
+        from tools.iot_hikvision import _hikvision_set_motion_detection
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = ValueError("Missing env vars")
+            result = _hikvision_set_motion_detection(enabled=True)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_set_motion_detection_internal_error(self):
+        from tools.iot_hikvision import _hikvision_set_motion_detection
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("unexpected failure")
+            result = _hikvision_set_motion_detection(enabled=False)
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_get_event_config error paths
+
+    def test_get_event_config_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_get_event_config
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_event_triggers.return_value = None
+            mock_create.return_value = mock_client
+            result = _hikvision_get_event_config()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_get_event_config_internal_error(self):
+        from tools.iot_hikvision import _hikvision_get_event_config
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("timeout")
+            result = _hikvision_get_event_config()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_get_alarm_server error paths
+
+    def test_get_alarm_server_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_get_alarm_server
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_alarm_server.return_value = None
+            mock_create.return_value = mock_client
+            result = _hikvision_get_alarm_server()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_get_alarm_server_missing_creds(self):
+        from tools.iot_hikvision import _hikvision_get_alarm_server
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = ValueError("Missing credentials")
+            result = _hikvision_get_alarm_server()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    # _hikvision_snapshot_to_file error paths
+
+    def test_snapshot_to_file_isapi_error(self):
+        from tools.iot_hikvision import _hikvision_snapshot_to_file
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.save_snapshot.return_value = {
+                "saved": False,
+                "error": "disk full",
+            }
+            mock_create.return_value = mock_client
+            result = _hikvision_snapshot_to_file("/tmp/test.jpg")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "ISAPI_ERROR"
+
+    def test_snapshot_to_file_missing_creds(self):
+        from tools.iot_hikvision import _hikvision_snapshot_to_file
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = ValueError("Missing creds")
+            result = _hikvision_snapshot_to_file("/tmp/test.jpg")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_snapshot_to_file_internal_error(self):
+        from tools.iot_hikvision import _hikvision_snapshot_to_file
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = Exception("permission denied")
+            result = _hikvision_snapshot_to_file("/tmp/test.jpg")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_isapi_health error paths
+
+    def test_isapi_health_vmd_dead_calls_ok(self):
+        from tools.iot_hikvision import _hikvision_isapi_health
+
+        with (
+            patch("tools.iot_hikvision.get_container_status") as mock_status,
+            patch("tools.iot_hikvision.count_vmd_events") as mock_vmd,
+            patch("tools.iot_hikvision.count_call_events") as mock_calls,
+        ):
+            mock_status.return_value = {"running": True, "status": "running"}
+            mock_vmd.return_value = {
+                "vmd_count": 0,
+                "isapi_healthy": False,
+                "check_window": "4h",
+            }
+            mock_calls.return_value = {
+                "call_count": 3,
+                "has_calls": True,
+                "check_window": "4h",
+            }
+            result = _hikvision_isapi_health(since="4h")
+        data = json.loads(result)
+        assert data["data"]["overall"] == "healthy"
+        assert "VMD event pipeline is dead" in result
+
+    def test_isapi_health_value_error(self):
+        from tools.iot_hikvision import _hikvision_isapi_health
+
+        with patch(
+            "tools.iot_hikvision.get_container_status",
+            side_effect=ValueError("config error"),
+        ):
+            result = _hikvision_isapi_health(since="4h")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_isapi_health_internal_error(self):
+        from tools.iot_hikvision import _hikvision_isapi_health
+
+        with patch(
+            "tools.iot_hikvision.get_container_status",
+            side_effect=Exception("docker daemon down"),
+        ):
+            result = _hikvision_isapi_health(since="4h")
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    # _hikvision_pipeline_diagnose error paths
+
+    def test_pipeline_diagnose_oserror_handling(self):
+        from tools.iot_hikvision import _hikvision_pipeline_diagnose
+
+        with (
+            patch("tools.iot_hikvision.get_container_status") as mock_status,
+            patch("tools.iot_hikvision.get_container_logs") as mock_logs,
+            patch("tools.iot_hikvision.os.path.isdir", return_value=True),
+            patch(
+                "tools.iot_hikvision.os.listdir",
+                side_effect=OSError("permission error"),
+            ),
+        ):
+            mock_status.return_value = {"running": True, "status": "running"}
+            mock_logs.return_value = (
+                "Connected to doorbell: Gate type: VillaVTO\n"
+                "Motion detected from Gate\n"
+                "Doorbell ringing\n"
+                "Invoking device trigger automation\n"
+            )
+            result = _hikvision_pipeline_diagnose()
+        data = json.loads(result)
+        assert data["data"]["overall"] == "degraded"
+        assert any("No snapshots" in i for i in data["data"]["issues"])
+
+    def test_pipeline_diagnose_vmd_stopped_calls_ok(self):
+        from tools.iot_hikvision import _hikvision_pipeline_diagnose
+
+        with (
+            patch("tools.iot_hikvision.get_container_status") as mock_status,
+            patch("tools.iot_hikvision.get_container_logs") as mock_logs,
+            patch("tools.iot_hikvision.os.path.isdir", return_value=True),
+            patch("tools.iot_hikvision.os.listdir", return_value=[]),
+        ):
+            mock_status.return_value = {"running": True, "status": "running"}
+            mock_logs.return_value = "Doorbell ringing\n"
+            result = _hikvision_pipeline_diagnose()
+        data = json.loads(result)
+        assert data["data"]["overall"] == "degraded"
+        assert any("VMD events stopped" in i for i in data["data"]["issues"])
+
+    def test_pipeline_diagnose_value_error(self):
+        from tools.iot_hikvision import _hikvision_pipeline_diagnose
+
+        with patch(
+            "tools.iot_hikvision.get_container_status",
+            side_effect=ValueError("bad config"),
+        ):
+            result = _hikvision_pipeline_diagnose()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_pipeline_diagnose_internal_error(self):
+        from tools.iot_hikvision import _hikvision_pipeline_diagnose
+
+        with patch(
+            "tools.iot_hikvision.get_container_status",
+            side_effect=Exception("docker error"),
+        ):
+            result = _hikvision_pipeline_diagnose()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "INTERNAL_ERROR"
+
+    def test_take_snapshot_success(self):
+        from tools.iot_hikvision import _hikvision_take_snapshot
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.get_snapshot.return_value = b"fake_jpeg_bytes"
+            mock_create.return_value = mock_client
+            result = _hikvision_take_snapshot()
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["data"]["format"] == "jpeg"
+        assert "base64" in data["data"]
+
+    def test_take_snapshot_missing_creds(self):
+        from tools.iot_hikvision import _hikvision_take_snapshot
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_create.side_effect = ValueError("Missing creds")
+            result = _hikvision_take_snapshot()
+        data = json.loads(result)
+        assert data["success"] is False
+        assert data["error"]["code"] == "MISSING_CREDENTIALS"
+
+    def test_open_gate_success(self):
+        from tools.iot_hikvision import _hikvision_open_gate
+
+        with patch("tools.iot_hikvision.create_isapi_client") as mock_create:
+            mock_client = MagicMock()
+            mock_client.open_door.return_value = True
+            mock_create.return_value = mock_client
+            result = _hikvision_open_gate(door_id=1)
+        data = json.loads(result)
+        assert data["success"] is True
+        assert data["data"]["opened"] is True
+        assert data["data"]["door_id"] == 1

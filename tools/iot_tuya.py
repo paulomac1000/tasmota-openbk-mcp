@@ -751,7 +751,9 @@ def _tuya_verify_dps(identifier: str, spec: dict[str, Any] | None = None) -> str
     result_raw = _tuya_status(identifier)
     try:
         parsed = json.loads(result_raw)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError:
+        return result_raw
+    except TypeError:
         return result_raw
 
     if not parsed.get("success"):

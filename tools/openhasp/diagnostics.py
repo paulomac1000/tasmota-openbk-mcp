@@ -10,7 +10,9 @@ def _as_int(value: object, default: int = 0) -> int:
     if isinstance(value, (int, float, str)):
         try:
             return int(value)
-        except (ValueError, TypeError):
+        except ValueError:
+            return default
+        except TypeError:
             return default
     return default
 
@@ -130,7 +132,9 @@ def health_score(
     heap = 0
     try:
         heap = int(status.get("heapFree", status.get("heap_free", 0)))
-    except (ValueError, TypeError):
+    except ValueError:
+        pass
+    except TypeError:
         pass
     if heap > 0 and heap < 50000:
         score -= 5

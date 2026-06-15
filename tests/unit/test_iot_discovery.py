@@ -580,6 +580,336 @@ class TestFindDeviceByNameErrors:
             assert "cache corrupted" in data["error"]["message"]
 
 
+class TestDetectDeviceTypeTuya:
+    """Tests for Tuya device detection via TCP port probing."""
+
+    def test_detect_tuya_port_6668_open(self):
+        """Return 'tuya' when TCP port 6668 is reachable."""
+        with patch("tools.iot_discovery.requests.get") as mock_get:
+            with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+                mock_get.side_effect = Exception("Connection refused")
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 0
+                mock_socket_cls.return_value = mock_sock
+                result = _detect_device_type("192.168.1.100")
+                assert result == "tuya"
+
+    def test_detect_tuya_port_6667_open(self):
+        """Return 'tuya' when port 6668 is closed but 6667 is open."""
+        with patch("tools.iot_discovery.requests.get") as mock_get:
+            with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+                mock_get.side_effect = Exception("Connection refused")
+                sock1 = MagicMock()
+                sock1.connect_ex.return_value = 1
+                sock2 = MagicMock()
+                sock2.connect_ex.return_value = 0
+                mock_socket_cls.side_effect = [sock1, sock2]
+                result = _detect_device_type("192.168.1.100")
+                assert result == "tuya"
+
+    def test_detect_tuya_socket_exception_handled(self):
+        """Socket exceptions during Tuya probing are silently caught."""
+        with patch("tools.iot_discovery.requests.get") as mock_get:
+            with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+                mock_get.side_effect = Exception("Connection refused")
+                sock1 = MagicMock()
+                sock1.connect_ex.side_effect = OSError("Network unreachable")
+                sock2 = MagicMock()
+                sock2.connect_ex.side_effect = OSError("Network unreachable")
+                mock_socket_cls.side_effect = [sock1, sock2]
+                result = _detect_device_type("192.168.1.100")
+                assert result is None
+
+
+class TestDetectDeviceTypeOpenHASP:
+    """Tests for OpenHASP panel detection via config.json."""
+
+    def test_detect_openhasp_config(self):
+        """Return 'openhasp' when config.json contains 'hasp' key."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 200
+                r1.text = "<html>not openbk</html>"
+
+                r2 = MagicMock()
+                r2.status_code = 200
+                r2.text = "<html>not openbk</html>"
+
+                r3 = MagicMock()
+                r3.status_code = 200
+                r3.text = "<html>not tasmota</html>"
+
+                r4 = MagicMock()
+                r4.status_code = 200
+                r4.json.return_value = {"hasp": {"version": "0.7.0"}}
+
+                mock_get.side_effect = [r1, r2, r3, r4]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result == "openhasp"
+
+    def test_detect_openhasp_json_error(self):
+        """OpenHASP probe handles JSON decode error gracefully."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 200
+                r1.text = "<html>not openbk</html>"
+
+                r2 = MagicMock()
+                r2.status_code = 200
+                r2.text = "<html>not openbk</html>"
+
+                r3 = MagicMock()
+                r3.status_code = 200
+                r3.text = "<html>not tasmota</html>"
+
+                r4 = MagicMock()
+                r4.status_code = 200
+                r4.json.side_effect = json.JSONDecodeError("bad json", "", 0)
+
+                mock_get.side_effect = [r1, r2, r3, r4]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result is None
+
+
+class TestCacheFormatErrors:
+    """Tests for cache loading with unexpected data formats."""
+
+    def test_load_cache_returns_list_not_dict(self, tmp_path, monkeypatch):
+        """Cache file is valid JSON but a list instead of a dict."""
+        fake_cache = tmp_path / "discovered_devices.json"
+        fake_cache.write_text('[{"ip": "192.168.1.1"}]')
+        monkeypatch.setattr("tools.iot_discovery.CACHE_FILE", str(fake_cache))
+        result = _load_cache()
+        assert result == {"devices": [], "last_scan": None, "version": 1}
+
+    def test_get_cached_devices_not_a_list(self):
+        """Cached devices value is not a list."""
+        with patch("tools.iot_discovery._load_cache") as mock_load:
+            mock_load.return_value = {
+                "devices": "not_a_list",
+                "last_scan": None,
+                "version": 1,
+            }
+            result = _get_cached_devices()
+            assert result == []
+
+
+class TestProbeDeviceInfoTuya:
+    """Tests for Tuya device info probing."""
+
+    def test_probe_tuya_found_in_cache(self):
+        """Tuya probe matches device in local cache."""
+        entry = {"device_id": "bf5397fdf", "name": "MyVacuum", "version": "3.3"}
+        with patch("tools.iot_tuya._find_tuya_in_cache", return_value=entry):
+            info = _probe_device_info("192.168.1.100", "tuya")
+            assert info["reachable"] is True
+            assert info["type"] == "tuya"
+            assert info["name"] == "MyVacuum"
+            assert info["device_id"] == "bf5397fdf"
+            assert info["version"] == "protocol 3.3"
+
+    def test_probe_tuya_no_cache(self):
+        """Tuya probe with empty Tuya device cache."""
+        with patch("tools.iot_tuya._find_tuya_in_cache", return_value=None):
+            with patch("tools.iot_tuya._load_tuya_devices", return_value={"devices": {}}):
+                info = _probe_device_info("192.168.1.100", "tuya")
+                assert info["reachable"] is True
+                assert info["type"] == "tuya"
+                assert info["name"] == "Tuya_Device"
+                assert info["requires_registration"] is True
+
+    def test_probe_tuya_exception(self):
+        """Tuya probe handles exception from Tuya imports gracefully."""
+        with patch(
+            "tools.iot_tuya._find_tuya_in_cache",
+            side_effect=RuntimeError("Import failed"),
+        ):
+            info = _probe_device_info("192.168.1.100", "tuya")
+            assert info["reachable"] is True
+            assert info["type"] == "tuya"
+            assert info["name"] == "Tuya_Device"
+            assert info["requires_registration"] is True
+
+
+class TestProbeDeviceInfoOpenHASP:
+    """Tests for OpenHASP panel info probing."""
+
+    def test_probe_openhasp_with_config(self):
+        """Probe OpenHASP panel with valid configuration."""
+        mock_client = MagicMock()
+        mock_client.get_json.return_value = {
+            "mqtt": {"name": "Panel1"},
+            "hasp": {"version": "0.7.0"},
+            "gui": {"bckl": 128},
+        }
+        mock_client.count_objects.return_value = 5
+        with patch(
+            "tools.openhasp.http_client.OpenHASPHTTPClient",
+            return_value=mock_client,
+        ):
+            info = _probe_device_info("192.168.1.100", "openhasp")
+            assert info["reachable"] is True
+            assert info["type"] == "openhasp"
+            assert info["name"] == "Panel1"
+            assert info["version"] == "0.7.0"
+            assert info["bckl"] == 128
+            assert info["objects_count"] == 5
+
+    def test_probe_openhasp_no_config(self):
+        """OpenHASP probe returns default name when config is None."""
+        mock_client = MagicMock()
+        mock_client.get_json.return_value = None
+        with patch(
+            "tools.openhasp.http_client.OpenHASPHTTPClient",
+            return_value=mock_client,
+        ):
+            info = _probe_device_info("192.168.1.100", "openhasp")
+            assert info["reachable"] is True
+            assert info["type"] == "openhasp"
+            assert info["name"] == "OpenHASP"
+
+    def test_probe_openhasp_exception(self):
+        """OpenHASP probe handles client error gracefully."""
+        with patch(
+            "tools.openhasp.http_client.OpenHASPHTTPClient",
+            side_effect=ImportError("No module"),
+        ):
+            info = _probe_device_info("192.168.1.100", "openhasp")
+            assert info["reachable"] is True
+            assert info["type"] == "openhasp"
+            assert info["name"] == "OpenHASP"
+
+
+class TestDetectDeviceTypeOpenBK:
+    """Tests for _detect_device_type probe order: OpenBK /api/info -> /index -> Tasmota /cm.
+
+    OpenBK devices can also respond to Tasmota's /cm?cmnd=Status endpoint
+    (compatibility layer), so OpenBK-specific probes MUST run first to avoid
+    misidentification.
+    """
+
+    def test_detect_openbk_via_api_info(self):
+        """Probe 1: /api/info returns 200 JSON with 'build' key -> 'openbk'."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 200
+                r1.json.return_value = {"build": "1.17.306", "version": "1.0"}
+                mock_get.side_effect = [r1]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result == "openbk"
+                assert mock_get.call_count == 1
+                assert "/api/info" in mock_get.call_args[0][0]
+
+    def test_detect_openbk_via_index_html(self):
+        """Probe 2: /api/info 404, /index HTML contains 'OpenBeken' -> 'openbk'."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 404
+
+                r2 = MagicMock()
+                r2.status_code = 200
+                r2.text = "<html><body>OpenBeken Device</body></html>"
+
+                mock_get.side_effect = [r1, r2]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result == "openbk"
+                assert mock_get.call_count == 2
+
+    def test_detect_tasmota_with_probe_order(self):
+        """Probe 3: /api/info and /index fail, /cm?cmnd=Status succeeds -> 'tasmota'."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 404
+
+                r2 = MagicMock()
+                r2.status_code = 404
+
+                r3 = MagicMock()
+                r3.status_code = 200
+                r3.text = '{"Status":{"Module":0}}'
+
+                mock_get.side_effect = [r1, r2, r3]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result == "tasmota"
+                assert mock_get.call_count == 3
+
+    def test_detect_unknown_device(self):
+        """All 6 probes fail -> returns None."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 404
+                r2 = MagicMock()
+                r2.status_code = 200
+                r2.text = "<html>Regular page</html>"
+                r3 = MagicMock()
+                r3.status_code = 200
+                r3.text = "<html>Not tasmota</html>"
+                r4 = MagicMock()
+                r4.status_code = 200
+                r4.text = "not JSON"
+
+                mock_get.side_effect = [r1, r2, r3, r4]
+
+                sock1 = MagicMock()
+                sock1.connect_ex.return_value = 1
+                sock2 = MagicMock()
+                sock2.connect_ex.return_value = 1
+                mock_socket_cls.side_effect = [sock1, sock2]
+
+                result = _detect_device_type("192.168.1.100")
+                assert result is None
+                assert mock_get.call_count == 4
+
+    def test_detect_openbk_probe_order(self):
+        """OpenBK /api/info runs before Tasmota /cm, winning when both could match."""
+        with patch("tools.iot_discovery.socket.socket") as mock_socket_cls:
+            with patch("tools.iot_discovery.requests.get") as mock_get:
+                r1 = MagicMock()
+                r1.status_code = 200
+                r1.json.return_value = {"build": "1.17.306"}
+                mock_get.side_effect = [r1]
+
+                mock_sock = MagicMock()
+                mock_sock.connect_ex.return_value = 1
+                mock_socket_cls.return_value = mock_sock
+
+                result = _detect_device_type("192.168.1.100")
+                assert result == "openbk"
+                assert mock_get.call_count == 1
+                assert "/api/info" in mock_get.call_args[0][0]
+
+
 class TestDiscoveryRegistrationWrappers:
     """Tests for MCP tool registration wrappers."""
 

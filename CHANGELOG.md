@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.6.0] — 2026-06-07
+
+### Added
+- **Device Configuration Tools** (7 new tools) — set_flags, set_name, configure_mqtt, set_gpio, execute_command, start_ha_discovery, get_full_info
+- `iot_set_flags` — set device configuration flags as a 64-bit bitfield (OpenBK via /cfg_generic, Tasmota via SetOption)
+- `iot_set_name` — set device short and full name (OpenBK via /cfg_name)
+- `iot_configure_mqtt` — configure MQTT broker, port, client, group, user, password (OpenBK via /cfg_mqtt_set)
+- `iot_set_gpio` — configure GPIO pin roles and channels (OpenBK via /cfg_pins, write-guarded with warning)
+- `iot_execute_command` — execute raw /cm?cmnd= commands with blocked-command allowlist (OpenBK and Tasmota)
+- `iot_start_ha_discovery` — trigger Home Assistant MQTT discovery (OpenBK via /ha_discovery)
+- `iot_get_full_info` — enhanced device info returning MAC, firmware version, flags, MQTT, WiFi from Status 0 JSON
+- `tools/http_session.py` — generic IoT device HTTP client module with DeviceConnectionError, _DeviceHttpSession, _build_url dispatch
+- 159 new unit tests, 15 integration tests (live + mocked), 98% coverage on new code
+- `DEFAULT_HA_DISCOVERY_PREFIX` constant in tools/constants.py
+
+### Changed
+- `TOOLS_VERSION` bumped from 1.5.0 to 1.6.0
+- Registered tool count increased from 51 to 58
+
+### Documentation
+- README tool table updated with 7 new Device Configuration tools
+- AGENTS.md — no changes needed (patterns documented in existing config)
+
 ## [1.5.0] — 2026-06-06
 
 ### Added
@@ -15,6 +38,8 @@
 - `count_call_events()` Docker client function — counts doorbell ring events in container logs
 - `CAMERA_GATE_SNAPSHOTS_DIR` constant for snapshot archive path (env-overridable)
 - 33 new unit tests, 5 integration, 8 smoke, 3 E2E tests for Hikvision diagnostic tools
+- **CI/CD Standard v2.0.1 compliance** — full commit SHA pinning (23/23 actions), `persist-credentials: false` on all checkouts (7/7), broken attest action fix (`actions/attest@v4` → `attest-build-provenance@v2`), `workflow_dispatch` support in auto-tag, filename-based `gh workflow run`, branch guard on publish trigger, editable install with `--break-system-packages`, hardcoded `expected_tools: 51`, `returntocorp/semgrep-action` with full SHA, `docker` in `package_ecosystems`, duplicate tag guard
+- **MCP Server Standard v2.0.0 compliance** — Streamable HTTP `/mcp` endpoint (POST/GET/DELETE) on port 9102, session management with `Mcp-Session-Id`, Origin validation via `MCP_ALLOWED_ORIGINS`, transport selection via `MCP_TRANSPORT`, composable middleware pipeline (`AuthMiddleware` with timing-safe Bearer + API key, `RateLimitMiddleware` with sliding window, `LoggingMiddleware` with request_id), `TOOLS_VERSION` bump to 1.5.0, `_error_dict_extended()` dict-returning helper, `build_meta()` with `record_invocation()` side effect, 36 middleware + 61 transport unit tests (475 total, 84.5% coverage)
 
 ### Changed
 - `hikvision_check_vmd` soft-deprecated — docstring updated to recommend `hikvision_isapi_health`

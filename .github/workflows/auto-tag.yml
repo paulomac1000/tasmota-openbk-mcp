@@ -5,6 +5,11 @@ on:
     branches: [main]
     types: [closed]
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Semantic version (e.g. 1.2.3)'
+        required: true
+        type: string
 
 concurrency:
   group: auto-tag-${{ github.ref }}
@@ -15,34 +20,43 @@ env:
 
 jobs:
   tag:
-    if: github.event.pull_request.merged == true
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: write
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: Extract version from pyproject.toml
+      - name: Determine release version
         id: version
         run: |
-          VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Found version: $VERSION"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Using version: $(grep version= $GITHUB_OUTPUT | cut -d= -f2)"
 
       - name: Create and push tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git config user.name "local-home-devices-mcp-bot"
-          git config user.email "bot@local-home-devices-mcp.local"
-          git tag "v${{ steps.version.outputs.version }}"
-          git push origin "v${{ steps.version.outputs.version }}"
+          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Tag v${{ steps.version.outputs.version }} already exists — skipping"
+            exit 0
+          fi
+          git -c user.name="local-home-devices-mcp-bot" -c user.email="bot@local-home-devices-mcp.local" tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
+          git push https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git "v${{ steps.version.outputs.version }}"
 
       - name: Trigger downstream publish
         run: |
-          gh workflow run "Create and publish a Docker image" \
+          gh workflow run publish.yml \
             --ref "v${{ steps.version.outputs.version }}" \
             || echo "::warning::Publish workflow trigger failed or workflow not found"
         env:

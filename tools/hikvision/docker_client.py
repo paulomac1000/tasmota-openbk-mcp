@@ -7,6 +7,7 @@ No external dependencies - uses only Python stdlib.
 """
 
 import json
+import os
 import socket
 import time
 from typing import Any
@@ -14,6 +15,46 @@ from typing import Any
 from tools.constants import DOCKER_SOCKET, HIKVISION_CONTAINER_NAME
 
 CONTAINER_NAME = HIKVISION_CONTAINER_NAME
+
+__all__ = [
+    "_docker_available",
+    "get_container_status",
+    "get_container_logs",
+    "count_vmd_events",
+    "count_call_events",
+    "restart_container",
+]
+
+_docker_available_cache: bool | None = None
+
+
+def _docker_available() -> bool:
+    """Check if Docker socket is accessible at startup.
+
+    Returns True only if the socket file exists and is connectable.
+    Result is cached — socket path doesn't change during server lifetime.
+
+    Returns:
+        True if Docker socket is available, False otherwise.
+    """
+    global _docker_available_cache
+    if _docker_available_cache is not None:
+        return _docker_available_cache
+
+    if not os.path.exists(DOCKER_SOCKET):
+        _docker_available_cache = False
+        return False
+
+    try:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(2)
+        sock.connect(DOCKER_SOCKET)
+        sock.close()
+        _docker_available_cache = True
+        return True
+    except Exception:
+        _docker_available_cache = False
+        return False
 
 
 def _docker_request(method: str, path: str, timeout: int = 10) -> tuple[int, str] | None:
@@ -56,7 +97,9 @@ def _docker_request(method: str, path: str, timeout: int = 10) -> tuple[int, str
         status_line = headers_part.split("\r\n")[0]
         try:
             status_code = int(status_line.split(" ")[1])
-        except (ValueError, IndexError):
+        except ValueError:
+            return None
+        except IndexError:
             return None
 
         # Handle chunked transfer encoding

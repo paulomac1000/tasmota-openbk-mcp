@@ -11,6 +11,7 @@ import calendar
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import threading
@@ -74,7 +75,9 @@ def _load_cache() -> dict[str, Any]:
                 if not isinstance(result, dict):
                     return {"devices": [], "last_scan": None, "version": 1}
                 return result
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            return {"devices": [], "last_scan": None, "version": 1}
+        except OSError:
             return {"devices": [], "last_scan": None, "version": 1}
 
 
@@ -118,7 +121,9 @@ def _is_cache_fresh() -> bool:
     try:
         scan_time = calendar.timegm(time.strptime(last_scan, "%Y-%m-%dT%H:%M:%SZ"))
         return (time.time() - scan_time) < CACHE_TTL_SECONDS
-    except (ValueError, OverflowError):
+    except ValueError:
+        return False
+    except OverflowError:
         return False
 
 
@@ -182,24 +187,35 @@ def _resolve_ip(identifier: str) -> str | None:
 def _detect_device_type(ip: str, timeout: int = 5) -> str | None:
     """Detect if device is OpenBK, Tasmota, or Tuya by probing endpoints.
 
+    New probe order (2026-06-07): OpenBK first, then Tasmota, then Tuya, then OpenHASP.
+    OpenBK also responds to Tasmota's /cm?cmnd=Status endpoint, so we must
+    check OpenBK-specific endpoints BEFORE the Tasmota probe.
+
     Args:
         ip: IP address of the device to probe.
         timeout: Request timeout in seconds.
 
     Returns:
-        "tasmota", "openbk", "tuya" or None.
+        "openbk", "tasmota", "tuya", "openhasp" or None.
     """
+    # === PROBE 1: OpenBK via /api/info (unique JSON endpoint) ===
     try:
         resp = requests.get(
-            f"http://{ip}/cm?cmnd=Status",
+            f"http://{ip}/api/info",
             timeout=timeout,
             allow_redirects=False,
         )
-        if resp.status_code == 200 and '"Status"' in resp.text:
-            return "tasmota"
+        if resp.status_code == 200:
+            try:
+                data = resp.json()
+                if isinstance(data, dict) and "build" in data:
+                    return "openbk"
+            except Exception:
+                pass
     except Exception:
         pass
 
+    # === PROBE 2: OpenBK via /index HTML ===
     try:
         resp = requests.get(
             f"http://{ip}/index",
@@ -213,6 +229,19 @@ def _detect_device_type(ip: str, timeout: int = 5) -> str | None:
     except Exception:
         pass
 
+    # === PROBE 3: Tasmota via /cm?cmnd=Status ===
+    try:
+        resp = requests.get(
+            f"http://{ip}/cm?cmnd=Status",
+            timeout=timeout,
+            allow_redirects=False,
+        )
+        if resp.status_code == 200 and '"Status"' in resp.text:
+            return "tasmota"
+    except Exception:
+        pass
+
+    # === PROBE 4: Tuya TCP port 6668 ===
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
@@ -223,6 +252,7 @@ def _detect_device_type(ip: str, timeout: int = 5) -> str | None:
     except Exception:
         pass
 
+    # === PROBE 5: Tuya TCP port 6667 ===
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(2)
@@ -233,6 +263,7 @@ def _detect_device_type(ip: str, timeout: int = 5) -> str | None:
     except Exception:
         pass
 
+    # === PROBE 6: OpenHASP via /config.json ===
     try:
         resp = requests.get(
             f"http://{ip}/config.json",
@@ -286,6 +317,13 @@ def _probe_device_info(ip: str, device_type: str, timeout: int = 5) -> dict[str,
                 info["topic"] = status.get("Topic", "")
                 info["module"] = status.get("Module", 0)
                 info["power_on_state"] = status.get("PowerOnState", 0)
+
+                # BK7231N_/BK7231T_ MQTT topic prefix = OpenBK device
+                # Re-classify even when Tasmota compatibility layer returns Status JSON
+                if info["topic"] and (
+                    info["topic"].startswith("BK7231N_") or info["topic"].startswith("BK7231T_")
+                ):
+                    info["type"] = "openbk"
 
                 try:
                     wifi_resp = requests.get(f"http://{ip}/cm?cmnd=Status%205", timeout=timeout)
@@ -459,6 +497,15 @@ def _iot_discover_devices(network_range: str | None = None, timeout_seconds: int
     """
     if network_range is None:
         network_range = DEFAULT_NETWORK_RANGE
+    # Check nmap availability before attempting scan
+    if not shutil.which("nmap"):
+        return _error_response_extended(
+            code="DEPENDENCY_MISSING",
+            message="nmap is not installed. Install it with: apt-get install nmap",
+            suggestion="Install nmap via your package manager (apt, dnf, brew). "
+            "The Docker image includes it automatically.",
+        )
+
     try:
         alive_ips = _scan_network(network_range, timeout_seconds)
 

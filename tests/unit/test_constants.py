@@ -28,7 +28,7 @@ class TestResponseHelpers:
         assert data["data"] == {"key": "value"}
         assert "_meta" in data
         assert "request_id" in data["_meta"]
-        assert data["_meta"]["tool_version"] == "1.4.0"
+        assert data["_meta"]["tool_version"] == "1.6.0"
 
     def test_success_response_with_list(self):
         result = _success_response([1, 2, 3])
@@ -79,7 +79,7 @@ class TestResponseHelpers:
         # correlates with the log lines for the same invocation.
         assert meta["request_id"] == rid
         assert len(meta["request_id"]) == 36  # UUID length
-        assert meta["tool_version"] == "1.4.0"
+        assert meta["tool_version"] == "1.6.0"
 
     def test_build_meta_with_extra(self):
         meta = _build_meta(cached=True, duration_ms=42)
@@ -143,6 +143,27 @@ class TestToolManifest:
         for tool_name, manifest in TOOL_MANIFESTS.items():
             missing = required - set(manifest.keys())
             assert not missing, f"Tool '{tool_name}' missing fields: {missing}"
+
+    def test_new_config_tool_manifests_have_descriptions(self):
+        """Verify all 8 new v1.6.0 config tool manifests have non-empty descriptions."""
+        from tools.constants import TOOL_MANIFESTS
+
+        new_tools = [
+            "iot_set_flags",
+            "iot_set_name",
+            "iot_configure_mqtt",
+            "iot_set_gpio",
+            "iot_execute_command",
+            "iot_set_startup_command",
+            "iot_start_ha_discovery",
+            "iot_get_full_info",
+        ]
+
+        for tool_name in new_tools:
+            manifest = TOOL_MANIFESTS.get(tool_name)
+            assert manifest is not None, f"Missing manifest for {tool_name}"
+            desc = manifest.get("description", "")
+            assert desc, f"Empty description for {tool_name}"
 
 
 class TestRiskConsistencyMatrix:
@@ -306,3 +327,117 @@ class TestManifestFactories:
         assert m["side_effects"] == "destructive"
         assert m["concurrent_safe"] is False
         assert m["impact"] == "service_outage"
+
+
+class TestMetaHelpers:
+    """Tests for _build_meta and build_meta optional parameters."""
+
+    def test_build_meta_with_cached(self):
+        """_build_meta with cached=True should include cached in meta."""
+        meta = _build_meta(cached=True)
+        assert meta.get("cached") is True
+
+    def test_build_meta_with_retry_safe(self):
+        """_build_meta with retry_safe=True should include retry_safe in meta."""
+        meta = _build_meta(retry_safe=True)
+        assert meta.get("retry_safe") is True
+
+    def test_build_meta_with_extra_kwargs(self):
+        """_build_meta with extra kwargs should merge them into meta."""
+        meta = _build_meta(**{"custom_field": "custom_value"})
+        assert meta.get("custom_field") == "custom_value"
+
+    def test_error_dict_extended_with_all_options(self):
+        """_error_dict_extended with suggestion and available_names should include both."""
+        from tools.constants import _error_dict_extended
+
+        err = _error_dict_extended(
+            "TEST_CODE", "test message", True, suggestion="try X", available_names=["a", "b"]
+        )
+        assert err["success"] is False
+        assert err["error"]["suggestion"] == "try X"
+        assert err["error"]["available_names"] == ["a", "b"]
+
+    def test_build_meta_records_invocation(self):
+        """build_meta should record the tool invocation."""
+        from tools.constants import build_meta, get_tool_counts
+
+        counts_before = get_tool_counts().get("test_meta_tool", 0)
+        build_meta("test_meta_tool")
+        counts_after = get_tool_counts().get("test_meta_tool", 0)
+        assert counts_after == counts_before + 1
+
+    def test_build_meta_with_start_time(self):
+        """build_meta with start_time should compute duration_ms."""
+        import time
+
+        from tools.constants import build_meta
+
+        start = time.monotonic()
+        meta = build_meta("test_meta_time", start_time=start)
+        assert "request_id" in meta
+        assert "duration_ms" in meta
+        assert isinstance(meta["duration_ms"], int)
+        assert meta["duration_ms"] >= 0
+
+
+class TestUtilityFunctions:
+    """Tests for utility functions (get_tool_counts, sanitize_log_line, etc.)."""
+
+    def test_get_tool_counts(self):
+        """get_tool_counts should return a dict."""
+        from tools.constants import get_tool_counts
+
+        counts = get_tool_counts()
+        assert isinstance(counts, dict)
+
+    def test_sanitize_log_line(self):
+        """sanitize_log_line should redact sensitive patterns."""
+        from tools.constants import sanitize_log_line
+
+        result = sanitize_log_line("Authorization: Bearer secret123")
+        assert "secret123" not in result
+        assert "REDACTED" in result
+
+    def test_sanitize_log_line_preserves_normal(self):
+        """sanitize_log_line should preserve normal log text."""
+        from tools.constants import sanitize_log_line
+
+        result = sanitize_log_line("Normal log message")
+        assert result == "Normal log message"
+
+    def test_request_id_filter(self):
+        """RequestIdFilter should inject request_id from thread-local."""
+        import logging
+
+        from tools.constants import RequestIdFilter, set_request_id
+
+        set_request_id("test-rid-123")
+        filt = RequestIdFilter()
+        record = logging.LogRecord("test", logging.INFO, "", 0, "msg", (), None)
+        assert filt.filter(record) is True
+        assert record.request_id == "test-rid-123"
+
+    def test_inject_tool_risk_prefix(self):
+        """inject_tool_risk_prefix should prepend risk prefix to docstring."""
+        from tools.constants import inject_tool_risk_prefix
+
+        def fake_tool():
+            """Do something."""
+            pass
+
+        fake_tool.__name__ = "iot_get_device_info"
+        wrapped = inject_tool_risk_prefix(fake_tool)
+        assert wrapped.__doc__ == "[READ] Do something."
+
+    def test_inject_tool_risk_prefix_unknown(self):
+        """inject_tool_risk_prefix should pass through for unknown tools."""
+        from tools.constants import inject_tool_risk_prefix
+
+        def fake_tool():
+            """Do something."""
+            pass
+
+        fake_tool.__name__ = "nonexistent_tool"
+        wrapped = inject_tool_risk_prefix(fake_tool)
+        assert wrapped.__doc__ == "Do something."

@@ -20,6 +20,7 @@ from tools.constants import (
     start_tool_context,
 )
 from tools.hikvision.docker_client import (
+    _docker_available,
     count_call_events,
     count_vmd_events,
     get_container_logs,
@@ -363,122 +364,130 @@ def _hikvision_pipeline_diagnose() -> str:
 
 
 def register_hikvision_tools(mcp: Any) -> None:
-    """Register Hikvision doorbell tools with the MCP server."""
+    """Register Hikvision doorbell tools with the MCP server.
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_container_status() -> str:
-        """Get hikvision-doorbell Docker container running status and health.
+    ISAPI tools (direct device communication) always register.
+    Docker-dependent tools require /var/run/docker.sock.
+    """
 
-        Returns container state (running/stopped/error), health check status,
-        and start time. First step in any doorbell debugging session.
+    # Docker-dependent tools — only when Docker socket is available
+    if _docker_available():
 
-        Returns:
-            JSON with running (bool), status (str), started_at (str), health (str).
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_container_status() -> str:
+            """Get hikvision-doorbell Docker container running status and health.
 
-        @since v1.4.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("hikvision_container_status")
-            return _hikvision_container_status()
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            Returns container state (running/stopped/error), health check status,
+            and start time. First step in any doorbell debugging session.
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_container_logs(since: str = "1h", tail: int = 100) -> str:
-        """Fetch recent logs from the hikvision-doorbell Docker container.
+            Returns:
+                JSON with running (bool), status (str), started_at (str), health (str).
 
-        Key log patterns to look for:
-        - "Motion detected from Gate" - VMD (Video Motion Detection) events
-        - "Doorbell ringing" - someone pressed the call button
-        - "Connected to doorbell: Gate type: VillaVTO" - ISAPI auth successful
-        - "Call dismissed" - ring ended
-        - "Door X unlocked" - gate relay triggered
-        - "tampering_alarm" - physical tamper detected
+            @since v1.4.0
+            """
+            try:
+                start_tool_context()
+                increment_tool_count("hikvision_container_status")
+                return _hikvision_container_status()
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
 
-        Args:
-            since: Time window for logs (e.g. "1h", "4h", "24h"). Default "1h".
-            tail: Maximum number of lines to return (default 100).
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_container_logs(since: str = "1h", tail: int = 100) -> str:
+            """Fetch recent logs from the hikvision-doorbell Docker container.
 
-        Returns:
-            JSON with since, tail, log_size_chars, and logs text.
+            Key log patterns to look for:
+            - "Motion detected from Gate" - VMD (Video Motion Detection) events
+            - "Doorbell ringing" - someone pressed the call button
+            - "Connected to doorbell: Gate type: VillaVTO" - ISAPI auth successful
+            - "Call dismissed" - ring ended
+            - "Door X unlocked" - gate relay triggered
+            - "tampering_alarm" - physical tamper detected
 
-        @since v1.4.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("hikvision_container_logs")
-            return _hikvision_container_logs(since, tail)
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            Args:
+                since: Time window for logs (e.g. "1h", "4h", "24h"). Default "1h".
+                tail: Maximum number of lines to return (default 100).
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_check_vmd(since: str = "4h") -> str:
-        """Check if VMD (Video Motion Detection) events are flowing from the doorbell.
+            Returns:
+                JSON with since, tail, log_size_chars, and logs text.
 
-        Deprecated -- use hikvision_isapi_health for comprehensive health check
-        (container + VMD + call events).
+            @since v1.4.0
+            """
+            try:
+                start_tool_context()
+                increment_tool_count("hikvision_container_logs")
+                return _hikvision_container_logs(since, tail)
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
 
-        The Hikvision doorbell built-in VMD generates "Motion detected from Gate"
-        events on ANY motion including shadows, lighting changes, car headlights.
-        These false positives are NORMAL and expected. They are the canary for ISAPI
-        health: zero events for 4+ hours means the ISAPI connection from the
-        hikvision-doorbell container to the physical doorbell is silently dead.
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_check_vmd(since: str = "4h") -> str:
+            """Check if VMD (Video Motion Detection) events are flowing from the doorbell.
 
-        The container will still show "running" - use hikvision_container_status()
-        first to confirm, then this tool to diagnose the ISAPI layer.
+            Deprecated -- use hikvision_isapi_health for comprehensive health check
+            (container + VMD + call events).
 
-        Args:
-            since: Time window to check (default "4h"). Use "8h" overnight.
+            The Hikvision doorbell built-in VMD generates "Motion detected from Gate"
+            events on ANY motion including shadows, lighting changes, car headlights.
+            These false positives are NORMAL and expected. They are the canary for ISAPI
+            health: zero events for 4+ hours means the ISAPI connection from the
+            hikvision-doorbell container to the physical doorbell is silently dead.
 
-        Returns:
-            JSON with vmd_count (int), isapi_healthy (bool), check_window (str).
+            The container will still show "running" - use hikvision_container_status()
+            first to confirm, then this tool to diagnose the ISAPI layer.
 
-        @since v1.4.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("hikvision_check_vmd")
-            return _hikvision_check_vmd(since)
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            Args:
+                since: Time window to check (default "4h"). Use "8h" overnight.
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_restart_container() -> str:
-        """Restart the hikvision-doorbell Docker container.
+            Returns:
+                JSON with vmd_count (int), isapi_healthy (bool), check_window (str).
 
-        WARNING: Write operation - drops the ISAPI connection to the doorbell
-        and re-authenticates. The doorbell is unmonitored for ~10-15 seconds
-        during restart. Use only when hikvision_check_vmd() confirms ISAPI is
-        dead (isapi_healthy=false for 4+ hours).
+            @since v1.4.0
+            """
+            try:
+                start_tool_context()
+                increment_tool_count("hikvision_check_vmd")
+                return _hikvision_check_vmd(since)
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
 
-        After restart, verify recovery with:
-        1. hikvision_container_logs(since="30s") - look for "Connected to doorbell"
-        2. hikvision_check_vmd(since="30s") - VMD should resume within seconds
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_restart_container() -> str:
+            """Restart the hikvision-doorbell Docker container.
 
-        Returns:
-            JSON with success (bool) and message (str).
+            WARNING: Write operation - drops the ISAPI connection to the doorbell
+            and re-authenticates. The doorbell is unmonitored for ~10-15 seconds
+            during restart. Use only when hikvision_check_vmd() confirms ISAPI is
+            dead (isapi_healthy=false for 4+ hours).
 
-        @since v1.4.0
-        """
-        try:
-            start_tool_context()
-            check_write_enabled()
-            increment_tool_count("hikvision_restart_container")
-            return _hikvision_restart_container()
-        except ValidationError as exc:
-            return _error_response_extended(
-                code="WRITE_DISABLED",
-                message=str(exc),
-                suggestion="Ask the server operator to set ENABLE_WRITE_OPERATIONS=1.",
-            )
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            After restart, verify recovery with:
+            1. hikvision_container_logs(since="30s") - look for "Connected to doorbell"
+            2. hikvision_check_vmd(since="30s") - VMD should resume within seconds
 
+            Returns:
+                JSON with success (bool) and message (str).
+
+            @since v1.4.0
+            """
+            try:
+                start_tool_context()
+                check_write_enabled()
+                increment_tool_count("hikvision_restart_container")
+                return _hikvision_restart_container()
+            except ValidationError as exc:
+                return _error_response_extended(
+                    code="WRITE_DISABLED",
+                    message=str(exc),
+                    suggestion="Ask the server operator to set ENABLE_WRITE_OPERATIONS=1.",
+                )
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+
+    # ISAPI tools — always registered (direct device communication)
     @mcp.tool()
     @inject_tool_risk_prefix
     def hikvision_take_snapshot() -> str:
@@ -688,48 +697,51 @@ def register_hikvision_tools(mcp: Any) -> None:
         except Exception as exc:
             return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_isapi_health(since: str = "4h") -> str:
-        """Check doorbell pipeline health: container + VMD + call events.
+    # Docker-dependent composite tools — only when Docker socket is available
+    if _docker_available():
 
-        Composite health check that combines Docker container status,
-        VMD motion events, and doorbell call events into a single
-        health assessment (healthy/degraded/down).
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_isapi_health(since: str = "4h") -> str:
+            """Check doorbell pipeline health: container + VMD + call events.
 
-        Args:
-            since: Time window for event counting (default "4h"). Use "8h" overnight.
+            Composite health check that combines Docker container status,
+            VMD motion events, and doorbell call events into a single
+            health assessment (healthy/degraded/down).
 
-        Returns:
-            JSON with overall health, container info, vmd/calls event counts,
-            and any issues detected.
+            Args:
+                since: Time window for event counting (default "4h"). Use "8h" overnight.
 
-        @since v1.6.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("hikvision_isapi_health")
-            return _hikvision_isapi_health(since)
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            Returns:
+                JSON with overall health, container info, vmd/calls event counts,
+                and any issues detected.
 
-    @mcp.tool()
-    @inject_tool_risk_prefix
-    def hikvision_pipeline_diagnose() -> str:
-        """Cross-layer diagnostic of the entire doorbell pipeline.
+            @since v1.6.0
+            """
+            try:
+                start_tool_context()
+                increment_tool_count("hikvision_isapi_health")
+                return _hikvision_isapi_health(since)
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
 
-        Inspects 5 layers: Docker container, ISAPI auth, events (VMD/call),
-        MQTT automation triggers, and snapshot files on disk. Returns per-layer
-        status and a consolidated issues list.
+        @mcp.tool()
+        @inject_tool_risk_prefix
+        def hikvision_pipeline_diagnose() -> str:
+            """Cross-layer diagnostic of the entire doorbell pipeline.
 
-        Returns:
-            JSON with overall health, per-layer status dict, and issues list.
+            Inspects 5 layers: Docker container, ISAPI auth, events (VMD/call),
+            MQTT automation triggers, and snapshot files on disk. Returns per-layer
+            status and a consolidated issues list.
 
-        @since v1.6.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("hikvision_pipeline_diagnose")
-            return _hikvision_pipeline_diagnose()
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+            Returns:
+                JSON with overall health, per-layer status dict, and issues list.
+
+            @since v1.6.0
+            """
+            try:
+                start_tool_context()
+                increment_tool_count("hikvision_pipeline_diagnose")
+                return _hikvision_pipeline_diagnose()
+            except Exception as exc:
+                return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))

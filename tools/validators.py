@@ -127,6 +127,8 @@ def validate_cidr(cidr: str | None) -> str:
     return cidr
 
 
+_NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
+
 _OPENHASP_TELNET_ALLOWLIST = [
     re.compile(r"^backlight(?:\s+(?:on|off|[0-9]{1,3}))?$"),
     re.compile(r"^idle\s+off$"),
@@ -196,4 +198,129 @@ def validate_http_url(value: str | None, name: str) -> str:
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValidationError(f"{name} must be an HTTP or HTTPS URL")
+    return value
+
+
+def validate_flags_value(flags: int) -> int:
+    """Validate that a flags bitfield value is a non-negative integer within 64-bit range.
+
+    Args:
+        flags: Flags bitfield value to validate.
+
+    Returns:
+        The validated flags value.
+
+    Raises:
+        ValidationError: If value is not a non-negative integer or exceeds 2^64.
+    """
+    if not isinstance(flags, int) or isinstance(flags, bool):
+        raise ValidationError(f"Flags must be an integer, got {type(flags).__name__}")
+    if flags < 0:
+        raise ValidationError(f"Flags must be non-negative, got {flags}")
+    if flags >= 2**64:
+        raise ValidationError(f"Flags value exceeds 64-bit range: {flags}")
+    return flags
+
+
+def validate_pin_range(pin: int) -> int:
+    """Validate that a pin number is within valid range (0-63 for BK7231N).
+
+    Args:
+        pin: Pin number to validate.
+
+    Returns:
+        The validated pin number.
+
+    Raises:
+        ValidationError: If pin is outside 0-63 range.
+    """
+    if not isinstance(pin, int) or isinstance(pin, bool):
+        raise ValidationError(f"Pin must be an integer, got {type(pin).__name__}")
+    if not 0 <= pin <= 63:
+        raise ValidationError(f"Pin must be 0-63, got {pin}")
+    return pin
+
+
+def validate_channel_range(channel: int) -> int:
+    """Validate that a channel number is within valid range (0-63).
+
+    Note: This is for pin channel assignment (0-63), not the device channel
+    number used in power control (which is 1-based and validated by validate_channel).
+
+    Args:
+        channel: Channel number to validate.
+
+    Returns:
+        The validated channel number.
+
+    Raises:
+        ValidationError: If channel is outside 0-63 range.
+    """
+    if not isinstance(channel, int) or isinstance(channel, bool):
+        raise ValidationError(f"Channel must be an integer, got {type(channel).__name__}")
+    if not 0 <= channel <= 63:
+        raise ValidationError(f"Channel must be 0-63, got {channel}")
+    return channel
+
+
+def validate_name_pattern(name: str) -> str:
+    """Validate that a device name matches the allowed pattern.
+
+    OpenBK device names only allow: letters (a-z, A-Z), digits (0-9),
+    underscores (_), and hyphens (-). No spaces or special characters.
+
+    Args:
+        name: Name string to validate.
+
+    Returns:
+        The trimmed name string.
+
+    Raises:
+        ValidationError: If name contains invalid characters or is empty.
+    """
+    name = validate_required_string(name, "name")
+    if not _NAME_PATTERN.match(name):
+        raise ValidationError(
+            f"Name '{name}' contains invalid characters. "
+            "Only letters, digits, underscores, and hyphens are allowed."
+        )
+    return name
+
+
+def validate_mqtt_port(port: int) -> int:
+    """Validate that an MQTT port number is within valid range (1-65535).
+
+    Args:
+        port: Port number to validate.
+
+    Returns:
+        The validated port number.
+
+    Raises:
+        ValidationError: If port is outside 1-65535 range.
+    """
+    if not isinstance(port, int) or isinstance(port, bool):
+        raise ValidationError(f"Port must be an integer, got {type(port).__name__}")
+    if not 1 <= port <= 65535:
+        raise ValidationError(f"Port must be 1-65535, got {port}")
+    return port
+
+
+def validate_positive_int(value: int, name: str) -> int:
+    """Validate that a value is a positive integer.
+
+    Args:
+        value: Value to validate.
+        name: Parameter name for error messages.
+
+    Returns:
+        The validated value.
+
+    Raises:
+        ValidationError: If value is not a positive integer.
+    """
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValidationError(f"{name} must be an integer, got {type(value).__name__}")
+    if value <= 0:
+        raise ValidationError(f"{name} must be positive, got {value}")
     return value

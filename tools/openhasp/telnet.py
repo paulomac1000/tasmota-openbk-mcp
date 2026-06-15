@@ -185,7 +185,11 @@ class OpenHASPTelnet:
                 if not chunk:
                     break
                 chunks.append(chunk)
-        except (TimeoutError, BlockingIOError, OSError):
+        except TimeoutError:
+            pass
+        except BlockingIOError:
+            pass
+        except OSError:
             pass
         self._sock.settimeout(self.timeout)
         return b"".join(chunks).decode("utf-8", errors="ignore")

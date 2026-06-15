@@ -224,6 +224,67 @@ local-home-devices-mcp/
 3. **Docker build**: Build image and verify tool count via `python -c "from server import get_tool_count"`
 4. **Smoke test (Docker)**: Start container, curl health + tools endpoints, assert tool count, stop container
 
+## Pre-commit Hooks
+
+This project uses pre-commit hooks to catch issues before they reach CI. The hooks mirror our CI lint and test jobs exactly.
+
+### Setup
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### Manual Run
+
+```bash
+pre-commit run --all-files
+```
+
+### Hook Summary
+
+| Hook | Stage | Purpose | CI Equivalent |
+|------|-------|---------|---------------|
+| trailing-whitespace | pre-commit | Remove trailing whitespace | -- |
+| end-of-file-fixer | pre-commit | Ensure files end with newline | -- |
+| check-yaml/toml/json | pre-commit | Validate config file syntax | -- |
+| detect-private-key | pre-commit | Prevent committing secrets | -- |
+| ruff check | pre-commit | Lint Python code | ci.yml lint job |
+| ruff format --check | pre-commit | Format Python code | ci.yml lint job |
+| mypy | pre-commit | Static type checking | ci.yml lint job |
+| bandit | pre-commit | Security scanning | ci.yml lint job |
+| pytest unit | pre-commit | Run unit tests | ci.yml test job |
+| tool count validate | pre-commit | Verify MCP tool count | ci.yml docker-smoke |
+
+## Conditional Tool Registration
+
+Some tools depend on optional infrastructure (Docker socket, system binaries like nmap, Python libraries like tinytuya). These tools should fail gracefully rather than crash the server.
+
+### Pattern: `_X_available()` check -> `DEPENDENCY_MISSING` error
+
+Follow the existing Canonical Template 1 pattern:
+
+1. **Lazy import check at module level** -- `_import_tinytuya()` in `tools/iot_tuya.py` returns `True` only if the library is importable.
+2. **Tool checks at invocation time** -- if `_import_tinytuya()` returns `False`, return `_error_response_extended(code="DEPENDENCY_MISSING", ...)`.
+3. **Docker tools check socket existence** -- `_docker_available()` in `tools/hikvision/docker_client.py` checks if `/var/run/docker.sock` exists.
+4. **System binaries** -- `shutil.which("nmap")` in `tools/iot_discovery.py` returns the path or `None`.
+
+### Examples in this codebase
+
+| Dependency | Check Function | Tool Type |
+|------------|---------------|-----------|
+| tinytuya library | `_import_tinytuya()` | Tuya cloud/local |
+| paho-mqtt library | `_get_mqtt_client()` | MQTT publish/state |
+| Docker socket | `_docker_available()` | Hikvision container tools |
+| nmap binary | `shutil.which("nmap")` | Device discovery |
+
+### Tool Registration Rules
+
+- **ISAPI/HTTP tools** (direct device communication) -- always registered, no infrastructure dependency.
+- **Docker tools** (container status, logs, restart) -- registered only when `_docker_available()`.
+- **MQTT tools** -- always registered, return `DEPENDENCY_MISSING` at invocation time.
+- **Discovery** -- always registered, check nmap before scanning.
+
 ## Common Pitfalls
 
 ### Hardcoded IPs and Ports

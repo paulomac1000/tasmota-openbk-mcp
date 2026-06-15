@@ -427,21 +427,113 @@ class TestWifiConfig:
                 "tools.iot_discovery._detect_device_type",
                 return_value="openbk",
             ):
-                with patch("tools.iot_control.requests.get") as mock_get:
-                    resp = MagicMock()
-                    resp.status_code = 200
-                    resp.text = """
-                    <html><head><title>My Light</title></head>
-                    <body>
-                    <h5>Wifi RSSI: Good (-55dBm)</h5>
-                    <h5>Device MAC: 18:DE:50:34:F6:5F</h5>
-                    </body></html>
-                    """
-                    mock_get.return_value = resp
+                mock_status = {
+                    "name": "My Light",
+                    "ssid": "MyWiFi",
+                    "rssi": -55,
+                    "signal": -55,
+                    "mac": "18:DE:50:34:F6:5F",
+                    "ip": "192.168.1.101",
+                    "gateway": "192.168.1.1",
+                    "hostname": "my-light",
+                    "dns": "192.168.1.1",
+                }
+                with patch(
+                    "tools.iot_devices._get_openbk_status",
+                    return_value=mock_status,
+                ):
                     result = _get_wifi_config("192.168.1.101")
                     data = json.loads(result)
                     assert data["success"] is True
+                    assert data["data"]["wifi"]["ssid"] == "MyWiFi"
                     assert data["data"]["wifi"]["rssi"] == -55
+                    assert data["data"]["wifi"]["signal"] == -55
+                    assert data["data"]["wifi"]["mac"] == "18:DE:50:34:F6:5F"
+                    assert data["data"]["wifi"]["ip"] == "192.168.1.101"
+                    assert data["data"]["wifi"]["gateway"] == "192.168.1.1"
+                    assert data["data"]["wifi"]["hostname"] == "my-light"
+                    assert data["data"]["wifi"]["dns"] == "192.168.1.1"
+
+    def test_get_wifi_openbk_returns_all_fields(self):
+        with patch(
+            "tools.iot_discovery._resolve_ip",
+            return_value="192.168.1.101",
+        ):
+            with patch(
+                "tools.iot_discovery._detect_device_type",
+                return_value="openbk",
+            ):
+                mock_status = {
+                    "name": "OpenBK Test Device",
+                    "ssid": "Test_SSID",
+                    "rssi": 62,
+                    "signal": -69,
+                    "mac": "AA:BB:CC:DD:EE:11",
+                    "ip": "192.168.1.101",
+                    "gateway": "192.168.1.1",
+                    "hostname": "openbk-test",
+                    "dns": "192.168.1.1",
+                }
+                with patch(
+                    "tools.iot_devices._get_openbk_status",
+                    return_value=mock_status,
+                ):
+                    result = _get_wifi_config("192.168.1.101")
+                    data = json.loads(result)
+                    assert data["success"] is True
+                    assert data["data"]["device_type"] == "openbk"
+                    assert data["data"]["wifi"]["ssid"] == "Test_SSID"
+                    assert data["data"]["wifi"]["rssi"] == 62
+                    assert data["data"]["wifi"]["signal"] == -69
+                    assert data["data"]["wifi"]["mac"] == "AA:BB:CC:DD:EE:11"
+                    assert data["data"]["wifi"]["ip"] == "192.168.1.101"
+                    assert data["data"]["wifi"]["gateway"] == "192.168.1.1"
+                    assert data["data"]["wifi"]["hostname"] == "openbk-test"
+                    assert data["data"]["wifi"]["dns"] == "192.168.1.1"
+
+    def test_get_wifi_openbk_status_five_fallback(self):
+        """Status 0 returned 404, so only HTML-scraped fields available."""
+        with patch(
+            "tools.iot_discovery._resolve_ip",
+            return_value="192.168.1.101",
+        ):
+            with patch(
+                "tools.iot_discovery._detect_device_type",
+                return_value="openbk",
+            ):
+                mock_status = {
+                    "name": "OpenBK Test Device",
+                    "channels": [],
+                    "rssi": -65,
+                    "mac": "00:11:22:33:44:55",
+                    "ip": None,
+                    "gateway": None,
+                    "hostname": None,
+                    "dns": None,
+                    "ssid": None,
+                    "signal": None,
+                    "signal_quality": "Good",
+                    "version": "1.17.0",
+                    "uptime_seconds": 3600,
+                    "mqtt_connected": True,
+                    "reboot_reason": None,
+                }
+                with patch(
+                    "tools.iot_devices._get_openbk_status",
+                    return_value=mock_status,
+                ):
+                    result = _get_wifi_config("192.168.1.101")
+                    data = json.loads(result)
+                    assert data["success"] is True
+                    assert data["data"]["device_type"] == "openbk"
+                    assert data["data"]["wifi"]["ssid"] is None
+                    assert data["data"]["wifi"]["rssi"] == -65
+                    assert data["data"]["wifi"]["signal"] is None
+                    assert data["data"]["wifi"]["mac"] == "00:11:22:33:44:55"
+                    assert data["data"]["wifi"]["ip"] is None
+                    assert data["data"]["wifi"]["gateway"] is None
+                    assert data["data"]["wifi"]["hostname"] is None
+                    assert data["data"]["wifi"]["dns"] is None
 
     def test_get_wifi_by_name(self):
         with patch(
@@ -492,6 +584,20 @@ class TestWifiConfigErrors:
         with patch("tools.iot_discovery._resolve_ip", return_value="192.168.1.100"):
             with patch("tools.iot_discovery._detect_device_type", return_value="matter"):
                 result = _get_wifi_config("192.168.1.100")
+                data = json.loads(result)
+                assert data["success"] is False
+                assert "Device not found" in data["error"]["message"]
+
+    def test_get_wifi_openbk_device_unreachable(self):
+        with patch(
+            "tools.iot_discovery._resolve_ip",
+            return_value="192.168.1.101",
+        ):
+            with patch(
+                "tools.iot_discovery._detect_device_type",
+                return_value=None,
+            ):
+                result = _get_wifi_config("192.168.1.101")
                 data = json.loads(result)
                 assert data["success"] is False
                 assert "Device not found" in data["error"]["message"]
