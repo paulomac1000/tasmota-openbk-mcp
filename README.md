@@ -289,12 +289,14 @@ The project has a 4-tier test hierarchy (see `AGENTS.md` for details):
 
 | Suite | Tests | Coverage | Command |
 |-------|-------|----------|---------|
-| Unit | 378 | **>80%** | `pytest tests/unit/ -v --tb=short` |
-| Integration | 25 | **66%** | `pytest tests/integration/ -q` |
-| Smoke | 25 | HTTP validation | `pytest tests/smoke/ -q` |
-| E2E | 9 | HTTP validation | `pytest tests/e2e/ -q` |
+| Unit | 786 | **91.18%** | `pytest tests/unit/ -v --tb=short` |
+| Integration | 87 | 66% (live+mocked) | `pytest tests/integration/ -q` |
+| Smoke | 51 | HTTP validation | `pytest tests/smoke/ -q` |
+| E2E | 32 | HTTP validation | `pytest tests/e2e/ -q` |
 
-Unit tests run in CI. Integration, smoke, and e2e tests skip when their dependencies (MQTT broker, running server) are absent.
+**Total: 956 tests** (786 unit + 87 integration + 51 smoke + 32 e2e). Unit tests run in CI. Integration, smoke, and e2e tests skip when their dependencies (MQTT broker, running server) are absent.
+
+The `tests/fixtures_real_devices.py` file contains anonymized real-device response shapes (Tasmota 12.5.0, OpenBK 1.17.306) captured from the home network. The `tests/integration/test_real_devices_anonymized.py` (19 tests) and `tests/e2e/test_real_readonly_endpoints.py` (13 tests) suites use these fixtures to verify tool behavior against real response shapes without depending on actual network devices.
 
 The server follows the [MCP Server Standards](https://github.com/paulomac1000/ai-skills/blob/main/skills/mcp-server-architect/mcp-server-standards.md) at L2/L3 maturity level.
 

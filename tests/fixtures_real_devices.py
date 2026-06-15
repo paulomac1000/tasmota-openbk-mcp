@@ -240,8 +240,8 @@ Short name: Light_Bedroom, Chipset BK7231N
 
 MOCK_OPENBK_LIGHT_STATE: str = (
     "<table><tr><td class='off'>OFF</td><td class='on'>ON</td></tr></table>\n"
-    "<table><tr><td><form action=\"index\"><input type=\"hidden\" name=\"tgl\" value=\"1\">\n"
-    "<input class=\"bred\" type=\"submit\" value=\"Toggle 1\"/></form></td></tr></table>\n"
+    '<table><tr><td><form action="index"><input type="hidden" name="tgl" value="1">\n'
+    '<input class="bred" type="submit" value="Toggle 1"/></form></td></tr></table>\n'
     "<table></table>\n"
     "<h5>0 drivers active, total 36</h5>\n"
     "<h5>Channel 0 = 0.00, Channel 1 = 0.00, Channel 2 = 1.00</h5>\n"
@@ -273,12 +273,12 @@ MOCK_OPENBK_CURTAINS_STATE: str = (
     "<table><tr><td class='off'>OFF</td>"
     "<td class='off'>OFF</td>"
     "<td class='off'>OFF</td></tr></table>\n"
-    "<table><tr><td><form action=\"index\"><input type=\"hidden\" name=\"tgl\" value=\"1\">\n"
-    "<input class=\"bred\" type=\"submit\" value=\"Toggle Close\"/></form></td>\n"
-    "<td><form action=\"index\"><input type=\"hidden\" name=\"tgl\" value=\"2\">\n"
-    "<input class=\"bred\" type=\"submit\" value=\"Toggle Stop\"/></form></td>\n"
-    "<td><form action=\"index\"><input type=\"hidden\" name=\"tgl\" value=\"3\">\n"
-    "<input class=\"bred\" type=\"submit\" value=\"Toggle Open\"/></form></td></tr></table>\n"
+    '<table><tr><td><form action="index"><input type="hidden" name="tgl" value="1">\n'
+    '<input class="bred" type="submit" value="Toggle Close"/></form></td>\n'
+    '<td><form action="index"><input type="hidden" name="tgl" value="2">\n'
+    '<input class="bred" type="submit" value="Toggle Stop"/></form></td>\n'
+    '<td><form action="index"><input type="hidden" name="tgl" value="3">\n'
+    '<input class="bred" type="submit" value="Toggle Open"/></form></td></tr></table>\n'
     "<table></table>\n"
     "<h5>0 drivers active, total 36</h5>\n"
     "<h5>Channel 0 = 0.00, Channel 1 = 0.00, Channel 2 = 1.00</h5>\n"

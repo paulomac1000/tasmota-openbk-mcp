@@ -57,10 +57,10 @@ def register_iot_control_tools(mcp):
 
 | Suite | Location | Runtime | Requires | Tests | Run with |
 |-------|----------|---------|----------|-------|----------|
-| Unit | `tests/unit/` | <1s | Nothing | 322 | `pytest tests/unit/ -q` |
-| Smoke | `tests/smoke/` | <5s | Running MCP server (localhost:9102) | 17 | `pytest tests/smoke/ -q` |
-| Integration | `tests/integration/` | ~60s | Real MQTT broker (`MQTT_BROKER` env) | 68 | `pytest tests/integration/ -q` |
-| E2E | `tests/e2e/` | <10s | Running MCP server (localhost:9102) | 19 | `pytest tests/e2e/ -q` |
+| Unit | `tests/unit/` | <1s | Nothing | 786 | `pytest tests/unit/ -q` |
+| Smoke | `tests/smoke/` | <5s | Running MCP server (localhost:9102) | 51 | `pytest tests/smoke/ -q` |
+| Integration | `tests/integration/` | ~60s | Real MQTT broker (`MQTT_BROKER` env) | 87 | `pytest tests/integration/ -q` |
+| E2E | `tests/e2e/` | <10s | Running MCP server (localhost:9102) | 32 | `pytest tests/e2e/ -q` |
 
 ## Test Rules
 
@@ -164,7 +164,7 @@ local-home-devices-mcp/
 ├── tools/
 │   ├── __init__.py
 │   ├── __main__.py
-│   ├── constants.py             # SSOT for shared configuration defaults
+│   ├── constants.py             # SSOT for shared configuration defaults (no hardcoded IPs in tool files)
 │   ├── validators.py            # Input validation
 │   ├── iot_control.py           # Power/brightness/restart/WiFi (4 tools)
 │   ├── iot_devices.py           # Device info/power (2 tools)
@@ -172,34 +172,49 @@ local-home-devices-mcp/
 │   ├── iot_mqtt.py              # MQTT publish/state/topic (3 tools)
 │   ├── iot_meta.py              # Capability introspection (1 tool)
 │   ├── iot_tuya.py              # Tuya cloud + local control (10 tools)
-│   ├── iot_openhasp.py          # OpenHASP panel tools (20 tools)
-│   ├── iot_hikvision.py         # Hikvision doorbell tools (7 tools)
+│   ├── iot_openhasp.py          # OpenHASP panel control, diagnostics, Telnet (20 tools)
+│   ├── iot_config.py            # Device configuration tools (9 tools)
+│   ├── middleware/              # Auth, logging, rate-limiting middleware
+│   ├── iot_hikvision.py         # Hikvision doorbell tools (14 tools)
 │   ├── openhasp/                # OpenHASP sub-package (HTTP, Telnet, diagnostics)
-│   └── hikvision/               # Hikvision sub-package (ISAPI, Docker)
+│   └── hikvision/               # Hikvision sub-package (ISAPI HTTP client, Docker socket helper)
+│   └── http_session.py          # Generic IoT device HTTP client module
 ├── tests/
 │   ├── conftest.py              # Root: env loading only (~30 lines)
 │   ├── fixtures.py              # Mock data constants (MOCK_TASMOTA_DEVICE, etc.)
+│   ├── fixtures_real_devices.py # Anonymized real-device response fixtures (v1.6.0+)
 │   ├── unit/                    # Unit tests (zero I/O, fully mocked)
 │   │   ├── conftest.py          # Unit fixtures (mock_mcp, mock_requests)
-│   │   ├── test_constants.py    # 20 tests
-│   │   ├── test_validators.py   # 36 tests
-│   │   ├── test_iot_control.py  # 47 tests
-│   │   ├── test_iot_devices.py  # 28 tests
-│   │   ├── test_iot_discovery.py # 49 tests
-│   │   ├── test_iot_mqtt.py     # 20 tests
-│   │   ├── test_iot_meta.py     # 5 tests
-│   │   ├── test_iot_tuya.py     # 38 tests
-│   │   ├── test_openhasp.py     # 36 tests
-│   │   └── test_iot_hikvision.py # 44 tests
+│   │   ├── test_constants.py    # 47 tests
+│   │   ├── test_validators.py   # 26 tests
+│   │   ├── test_iot_control.py  # 62 tests
+│   │   ├── test_iot_devices.py  # 67 tests
+│   │   ├── test_iot_discovery.py # 86 tests
+│   │   ├── test_iot_mqtt.py     # 26 tests
+│   │   ├── test_iot_meta.py     # 8 tests
+│   │   ├── test_iot_tuya.py     # 45 tests
+│   │   ├── test_openhasp.py     # 50 tests
+│   │   ├── test_iot_hikvision.py # 114 tests
+│   │   ├── test_http_session.py  # 77 tests
+│   │   ├── test_iot_config.py   # 164 tests
+│   │   ├── test_middleware.py   # 42 tests
+│   │   └── test_transports.py   # 66 tests
 │   ├── smoke/                   # REST API smoke tests
 │   │   ├── conftest.py          # Dynamic skip + REST_API_URL
 │   │   ├── test_connectivity.py # 3 tests
-│   │   └── test_critical_tools.py # 14 tests
+│   │   ├── test_critical_tools.py # 14 tests
+│   │   ├── test_config_tools.py # 22 tests
+│   │   ├── test_hikvision_diagnostic.py # 8 tests
+│   │   └── test_mcp_transport.py # 4 tests
 │   ├── integration/             # Real MQTT/device tests
 │   │   ├── conftest.py          # MCPWrapper + skip-if marker
-│   │   ├── test_real_tools.py   # 20 tests
+│   │   ├── test_real_tools.py   # 27 tests
 │   │   ├── test_openhasp_tools.py # 34 tests
-│   │   └── test_hikvision_tools.py # 7 tests
+│   │   ├── test_hikvision_tools.py # 12 tests
+│   │   ├── test_config_live.py  # 5 tests
+│   │   ├── test_config_replay.py # 23 tests
+│   │   ├── test_config_tools.py # 16 tests
+│   │   └── test_real_devices_anonymized.py # 19 tests (v1.6.0+, real-device mocks)
 │   └── e2e/                     # Full pipeline tests
 │       ├── conftest.py          # Dynamic skip + REST_API_URL
 │       ├── test_server_api.py   # 6 tests
