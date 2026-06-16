@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.6.0-real-integration] — 2026-06-15
+
+### Added
+- **`tests/fixtures_real_devices.py`** — Anonymized real-device response fixtures captured from home network (Tasmota 12.5.0 at 192.168.0.109, OpenBK 1.17.306 at 192.168.0.115 Light_Bedroom, 192.168.0.105 Curtains, 192.168.0.225 Socket). All IPs/MACs/Topics anonymized to `192.168.1.100-104` / `aa:bb:cc:dd:ee:XX` / `tasmota_XXXXXXXX`. Fixtures: `MOCK_TASMOTA_BASIC_STATUS_0`, `MOCK_TASMOTA_CURTAINS_STATUS_0`, `MOCK_OPENBK_LIGHT_API_INFO`, `MOCK_OPENBK_LIGHT_HTML`, `MOCK_OPENBK_LIGHT_STATE`, `MOCK_OPENBK_CURTAINS_API_INFO`, `MOCK_OPENBK_CURTAINS_HTML`, `MOCK_OPENBK_CURTAINS_STATE`, `MOCK_OPENBK_SOCKET_API_INFO`, `MOCK_DISCOVERED_DEVICES`
+- **`tests/integration/test_real_devices_anonymized.py`** — 19 new integration tests using anonymized device mocks. Coverage: Tasmota get_device_info, full_info, set_power, set_brightness, get_device_power, get_wifi_config, discover_devices. OpenBK get_device_info, set_power, full_info, set_brightness, restart_device, get_wifi_config. Curtains + Socket full workflows. Cache + resolve_ip discovery tests.
+- **`tests/e2e/test_real_readonly_endpoints.py`** — 13 new e2e tests for readonly endpoints. Tests: /health (status + tool count), /api/tools (count + categories), iot_list_devices, iot_get_device_info (real 192.168.0.115 OpenBK + 192.168.0.109 Tasmota), iot_discover_devices, iot_find_device_by_name, iot_check_device (real 192.168.0.1 router), describe_iot_capabilities, MCP SSE + messages transport. All tests skip cleanly when server is not running.
+
+### Changed
+- `tools/__init__.py` — `__version__` synced from `1.5.0` to `1.6.0` to match `TOOLS_VERSION` in `tools/constants.py` (which was already `1.6.0`)
+
+### Deployment
+- Docker image `local-home-devices-mcp:v1.6.0` built and tested (Python 3.14-slim, 529 MB, includes nmap)
+- Deployed to `/var/apps/ha-mcp-stack/docker-compose.yml` (replaces `v1.5.0`). Container runs healthy, all 67 tools available (Docker socket mounted enables Hikvision container tools)
+- Verified: container responds to `/health` (200, 67 tools, version 1.6.0), `/api/tools`, and 13 e2e readonly endpoint tests pass against deployed container
+
+### Test Results
+- 786 unit tests (from 786 baseline, no regressions)
+- 19 new integration tests (with `MQTT_BROKER` env)
+- 13 new e2e tests (against running container)
+- **Total: 818 tests, all pass**
+- Coverage: 91.18% (above 80% target)
+- mypy strict: 0 errors
+- ruff check: 0 errors
+
+### Documentation
+- `AGENTS.md` updated: test counts 786/51/87/32 (was 322/17/68/19), file tree updated with iot_config, middleware, hikvision, and new test files
+- `README.md` test counts updated to reflect new total
+
 ## [1.6.0] — 2026-06-07
 
 ### Added
