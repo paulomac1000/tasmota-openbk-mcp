@@ -125,57 +125,60 @@ class TestE2EReadonlyTools:
         )
         assert resp.status_code == 200
         body = resp.json()
-        assert body.get("success") is True
+        assert body.get("success") is True, (
+            f"iot_list_devices should succeed with empty cache, got: {body}"
+        )
         inner = body.get("result", {}).get("data", {})
-        # May be empty cache, but should not error
         assert "device_count" in inner or "devices" in inner
 
     def test_iot_get_device_info_real_openbk(self):
-        """iot_get_device_info against real OpenBK device 192.168.0.115."""
-        if not _server_running_with_real_network():
-            pytest.skip("Real network not available (192.168.0.115 unreachable)")
+        """iot_get_device_info against real OpenBK device 192.168.1.115."""
+        if not _server_running_with_real_network("192.168.1.115"):
+            pytest.skip("Real network not available (192.168.1.115 unreachable)")
 
         resp = requests.post(
             f"{REST_API_URL}/api/tools/iot_get_device_info",
-            json={"identifier": "192.168.0.115"},
+            json={"identifier": "192.168.1.115"},
             timeout=15,
         )
         assert resp.status_code == 200
         body = resp.json()
-        # Success or graceful failure (device offline)
-        if body.get("success"):
-            data = body.get("result", {}).get("data", {})
-            assert data.get("device_type") in ("openbk", "tasmota", "tuya", "openhasp")
+        assert body.get("success") is True, f"Expected success for known OpenBK device, got: {body}"
+        data = body.get("result", {}).get("data", {})
+        assert data.get("device_type") in ("openbk", "tasmota", "tuya", "openhasp")
 
     def test_iot_get_device_info_real_tasmota(self):
-        """iot_get_device_info against real Tasmota device 192.168.0.109."""
-        if not _server_running_with_real_network():
-            pytest.skip("Real network not available (192.168.0.109 unreachable)")
+        """iot_get_device_info against real Tasmota device 192.168.1.109."""
+        if not _server_running_with_real_network("192.168.1.109"):
+            pytest.skip("Real network not available (192.168.1.109 unreachable)")
 
         resp = requests.post(
             f"{REST_API_URL}/api/tools/iot_get_device_info",
-            json={"identifier": "192.168.0.109"},
+            json={"identifier": "192.168.1.109"},
             timeout=15,
         )
         assert resp.status_code == 200
         body = resp.json()
-        if body.get("success"):
-            data = body.get("result", {}).get("data", {})
-            assert data.get("device_type") in ("openbk", "tasmota", "tuya", "openhasp")
+        assert body.get("success") is True, (
+            f"Expected success for known Tasmota device, got: {body}"
+        )
+        data = body.get("result", {}).get("data", {})
+        assert data.get("device_type") in ("openbk", "tasmota", "tuya", "openhasp")
 
     def test_iot_discover_devices(self):
         """iot_discover_devices runs against network."""
         resp = requests.post(
             f"{REST_API_URL}/api/tools/iot_discover_devices",
-            json={"network_range": "192.168.0.0/24", "timeout_seconds": 30},
+            json={"network_range": "192.168.1.0/24", "timeout_seconds": 30},
             timeout=60,
         )
         assert resp.status_code == 200
         body = resp.json()
-        # Should succeed
-        if body.get("success"):
-            inner = body.get("result", {}).get("data", {})
-            assert "total_found" in inner or "by_type" in inner
+        assert body.get("success") is True, (
+            f"Discover devices should succeed against the network, got: {body}"
+        )
+        inner = body.get("result", {}).get("data", {})
+        assert "total_found" in inner or "by_type" in inner
 
     def test_iot_find_device_by_name_nonexistent(self):
         """iot_find_device_by_name returns error for unknown name."""
@@ -186,21 +189,25 @@ class TestE2EReadonlyTools:
         )
         assert resp.status_code == 200
         body = resp.json()
-        # Should return success=false with error (not crash)
-        assert "result" in body or "error" in body
+        assert "result" in body, f"Expected 'result' key in response, got: {body}"
+        assert "error" in body.get("result", {}), (
+            f"Expected 'error' field in result for unknown name, got: {body}"
+        )
 
     def test_iot_check_device_router(self):
-        """iot_check_device against router IP (192.168.0.1)."""
-        if not _server_running_with_real_network():
-            pytest.skip("Real network not available")
+        """iot_check_device against generic gateway IP (192.168.1.1)."""
+        if not _server_running_with_real_network("192.168.1.1"):
+            pytest.skip("Real network not available (192.168.1.1 unreachable)")
 
         resp = requests.post(
             f"{REST_API_URL}/api/tools/iot_check_device",
-            json={"ip_address": "192.168.0.1"},
+            json={"ip_address": "192.168.1.1"},
             timeout=10,
         )
         assert resp.status_code == 200
         # Don't assert specific result (may be IoT or not), just no crash
+        body = resp.json()
+        assert "result" in body, f"Expected 'result' key in response, got: {body}"
 
     def test_describe_iot_capabilities(self):
         """describe_iot_capabilities introspection tool works."""
@@ -211,8 +218,9 @@ class TestE2EReadonlyTools:
         )
         assert resp.status_code == 200
         body = resp.json()
-        # Should return tool manifest
-        assert body.get("success") is True or "error" in body
+        assert body.get("success") is True, (
+            f"describe_iot_capabilities should always succeed, got: {body}"
+        )
 
 
 class TestE2EMCPTransport:
@@ -248,8 +256,15 @@ class TestE2EMCPTransport:
             pass
 
 
-def _server_running_with_real_network(target: str = "192.168.0.115", port: int = 80) -> bool:
-    """Check if real network devices are reachable from this test runner."""
+def _server_running_with_real_network(target: str = "192.168.1.1", port: int = 80) -> bool:
+    """Check if a real network device is reachable from this test runner.
+
+    Args:
+        target: IP address to probe. Default 192.168.1.1 (generic gateway).
+            Each test should pass the specific IP it intends to test against
+            so an outage on one device does not skip the other tests.
+        port: TCP port to probe (default 80).
+    """
     try:
         s = socket.create_connection((target, port), timeout=2)
         s.close()

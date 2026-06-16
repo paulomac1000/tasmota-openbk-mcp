@@ -266,7 +266,7 @@ MOCK_OPENBK_CURTAINS_API_INFO: dict = {
 }
 
 MOCK_OPENBK_CURTAINS_HTML: str = MOCK_OPENBK_LIGHT_HTML.replace(
-    "Light_Bedroom", "Curtains LivingRoom"
+    "Light_Bedroom", "Curtains_LivingRoom"
 )
 
 MOCK_OPENBK_CURTAINS_STATE: str = (
