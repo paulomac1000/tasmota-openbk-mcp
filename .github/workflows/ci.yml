@@ -10,35 +10,113 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  AI_SKILLS_REVISION: 661ff01a5e70d58d6c94a12545b24647e52063ed
 
 jobs:
-  export-source-temporary:
+  quality:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
-      - name: Remove Git metadata
-        run: rm -rf .git
-      - name: Upload source snapshot
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: source-snapshot-${{ github.sha }}
-          path: .
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 1
 
-  lint:
+      - name: Check out standards
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          repository: paulomac1000/ai-skills
+          ref: ${{ env.AI_SKILLS_REVISION }}
+          path: .standards
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install project and quality tools
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Lint and format
+        run: |
+          ruff check .
+          ruff format --check .
+
+      - name: Type check
+        run: mypy local_home_devices_mcp
+
+      - name: Security scan
+        run: bandit -r local_home_devices_mcp tools -ll
+
+      - name: Validate AFDS documentation
+        run: python .standards/skills/afds-doc-writer/validate.py README.md docs
+
+      - name: Audit and validate AGENTS instructions
+        run: |
+          python .standards/skills/agents-md-architect/tools/audit_agents_md.py \
+            --strict --layout single --profile mcp-server --language en .
+          python .standards/skills/agents-md-architect/tools/validate_agents_md.py \
+            --strict --repository-root . --layout single --profile mcp-server \
+            --language en AGENTS.md
+
+      - name: Validate GitHub Actions policy
+        run: python .standards/skills/ci-cd-architect/tools/check_github_actions_policy.py .github/workflows
+
+  test:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
+    needs: quality
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+        with:
+          python-version: "3.14"
+          cache: pip
+
+      - name: Install project
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e '.[dev]'
+
+      - name: Run zero-I/O application smoke
+        run: python server.py --mock-self-test
+
+      - name: Run complete non-real-system suite
+        run: |
+          python -m pytest -m 'not real_system' \
+            --cov=local_home_devices_mcp \
+            --cov=tools \
+            --cov-report=term-missing \
+            --cov-report=xml
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
+        with:
+          files: ./coverage.xml
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  exact-wheel:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
@@ -47,122 +125,124 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install dependencies and linting tools
+      - name: Build exact wheel
         run: |
-          python -m pip install --upgrade pip --break-system-packages
-          pip install --break-system-packages -e ".[dev,mqtt,tuya]"
-          pip install --break-system-packages ruff mypy bandit
+          python -m pip install build==1.3.0
+          python -m build --wheel
+          sha256sum dist/*.whl | tee dist/SHA256SUMS
 
-      - name: Ruff check
-        run: ruff check .
-
-      - name: Ruff format check
-        run: ruff format --check .
-
-      - name: mypy
-        run: mypy tools/ --strict --no-warn-unused-ignores
-
-      - name: bandit
-        run: bandit -r tools/ -ll
-
-      - name: Validate documentation (CAFDS)
-        if: hashFiles('afds_config.yaml') != ''
+      - name: Install and smoke exact wheel
         run: |
-          curl -sS https://raw.githubusercontent.com/paulomac1000/ai-skills/main/skills/afds-doc-writer/docs_validate.py | python3 - \
-            --config afds_config.yaml --strict --baseline .afds-baseline.json ./
+          python -m venv /tmp/exact-wheel
+          /tmp/exact-wheel/bin/python -m pip install dist/*.whl
+          MCP_MOCK_MODE=1 ENABLE_WRITE_OPERATIONS=1 \
+            /tmp/exact-wheel/bin/local-home-devices-mcp --mock-self-test
 
-  test:
+      - name: Upload exact wheel
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: wheel-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 14
+
+  container:
     runs-on: ubuntu-latest
-    needs: lint
-    services:
-      mosquitto:
-        image: eclipse-mosquitto:latest
-        ports:
-          - 1883:1883
+    timeout-minutes: 25
+    needs: [test, exact-wheel]
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
 
-      - name: Set up Python 3.14
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
+      - name: Download the exact tested wheel
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          python-version: "3.14"
+          name: wheel-${{ github.sha }}
+          path: dist
 
-      - name: Install dependencies
+      - name: Verify exact wheel identity
+        run: sha256sum --check dist/SHA256SUMS
+
+      - name: Build image once from the exact wheel
+        run: docker build --tag local-home-devices-mcp:${{ github.sha }} .
+
+      - name: Smoke exact image on mocked data
         run: |
-          python -m pip install --upgrade pip --break-system-packages
-          pip install --break-system-packages -e ".[dev,mqtt,tuya]"
+          docker run --rm \
+            -e MCP_MOCK_MODE=1 \
+            -e ENABLE_WRITE_OPERATIONS=1 \
+            local-home-devices-mcp:${{ github.sha }} --mock-self-test
 
-      - name: Run unit tests with coverage
+      - name: Export the already tested image
         run: |
-          pytest tests/unit/ -v --tb=short \
-            --cov=tools \
-            --cov-report=term-missing \
-            --cov-report=xml
+          docker save local-home-devices-mcp:${GITHUB_SHA} | gzip -n > image.tar.gz
+          sha256sum image.tar.gz > image.tar.gz.sha256
 
-      - name: Run integration tests
-        env:
-          MQTT_BROKER: localhost
-        run: |
-          sudo apt-get update -qq && sudo apt-get install -y -qq nmap
-          pytest tests/integration/ -v --tb=short
-
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@e79a6962e0d4c0c17b229090214935d2e33f8354 # v6
+      - name: Upload exact image artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: ./coverage.xml
-          fail_ci_if_error: false
-          token: ${{ secrets.CODECOV_TOKEN }}
+          name: image-${{ github.sha }}
+          path: |
+            image.tar.gz
+            image.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
 
-  docker-smoke:
+  push-image:
     runs-on: ubuntu-latest
-    needs: test
-    services:
-      mosquitto:
-        image: eclipse-mosquitto:latest
-        ports:
-          - 1883:1883
+    timeout-minutes: 15
+    needs: container
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+      attestations: write
+      id-token: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - name: Download the tested image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          persist-credentials: false
+          name: image-${{ github.sha }}
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4
+      - name: Verify and load the exact image
+        run: |
+          sha256sum --check image.tar.gz.sha256
+          gzip -dc image.tar.gz | docker load
 
-      - name: Build Docker image
-        uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v7
+      - name: Log in to GHCR
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
-          context: .
-          load: true
-          tags: local-home-devices-mcp:test
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Smoke test - tool count
+      - name: Push the already tested image
+        id: push
         run: |
-          docker run --rm local-home-devices-mcp:test python3 -c "
-          from tools.constants import TOOL_MANIFESTS, DOCKER_TOOL_NAMES
-          from server import get_tool_count
-          full_count = len(TOOL_MANIFESTS)
-          tc = get_tool_count()
-          docker_count = len([name for name in TOOL_MANIFESTS if name in DOCKER_TOOL_NAMES])
-          min_expected = full_count - docker_count
-          msg = f'Tool count: {tc} (range [{min_expected}, {full_count}], full={full_count}, docker_missing={full_count - docker_count})'
-          assert min_expected <= tc <= full_count, f'{msg} -- OUT OF RANGE'
-          print(msg)
-          "
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${GITHUB_SHA}"
+          docker tag local-home-devices-mcp:${GITHUB_SHA} "${IMAGE}"
+          docker push "${IMAGE}"
+          IDENTITY="$(docker inspect --format='{{index .RepoDigests 0}}' "${IMAGE}")"
+          DIGEST="${IDENTITY#*@}"
+          printf '%s\n' "${IDENTITY}" | tee image-digest.txt
+          echo "subject_name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "${GITHUB_OUTPUT}"
+          echo "digest=${DIGEST}" >> "${GITHUB_OUTPUT}"
 
-      - name: Smoke test - REST API health + tools
-        run: |
-          docker run -d --rm --network host \
-            -e MQTT_BROKER=localhost \
-            -e MCP_UNSAFE_PUBLIC_ACCESS_CONFIRMED=1 \
-            --name mcp-smoke local-home-devices-mcp:test
-          sleep 5
-          curl -fsS --retry 10 --retry-delay 2 \
-            http://localhost:9100/health || exit 1
-          curl -s http://localhost:9102/api/tools \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['success'] is True; assert d['total'] == d['tool_count'] and d['total'] > 0, d; print('REST API smoke test OK', d['total'], 'tools')"
-          docker stop mcp-smoke
+      - name: Attest the immutable registry image
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ steps.push.outputs.subject_name }}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true
+
+      - name: Upload immutable registry identity
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: image-identity-${{ github.sha }}
+          path: image-digest.txt
+          if-no-files-found: error
+          retention-days: 90

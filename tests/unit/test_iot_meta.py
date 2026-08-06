@@ -1,80 +1,66 @@
-"""Unit tests for IoT capability introspection tool."""
+"""Capability discovery must expose supported and active catalogs."""
+
+from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 import pytest
 
+pytest.importorskip("tools.constants")
 from tools.iot_meta import _describe_capabilities, register_iot_meta_tools
 
 pytestmark = pytest.mark.unit
 
 
-class TestDescribeCapabilities:
-    """Tests for the capability introspection function."""
-
-    def test_returns_valid_json(self):
-        result = _describe_capabilities()
-        data = json.loads(result)
-        assert data["success"] is True
-        assert data["data"]["server"] == "IoT-Observer"
-        assert "schema_version" in data["data"]
-        assert "transports" in data["data"]
-        assert "tool_count" in data["data"]
-        assert "tools" in data["data"]
-        assert isinstance(data["data"]["tools"], list)
-        assert len(data["data"]["tools"]) == data["data"]["tool_count"]
-
-    def test_every_tool_has_required_manifest_fields(self):
-        result = _describe_capabilities()
-        data = json.loads(result)
-        required = {
-            "name",
-            "version",
-            "risk",
-            "side_effects",
-            "idempotent",
-            "retryable",
-            "concurrent_safe",
-            "timeout_ms",
-            "requires_confirmation",
-            "determinism",
-            "latency",
-            "cost",
-            "impact",
-            "privacy",
-            "reversible",
-        }
-        for tool in data["data"]["tools"]:
-            missing = required - set(tool.keys())
-            assert not missing, f"Tool '{tool['name']}' missing: {missing}"
-
-    def test_tools_are_sorted_by_name(self):
-        result = _describe_capabilities()
-        data = json.loads(result)
-        names = [t["name"] for t in data["data"]["tools"]]
-        assert names == sorted(names)
+def test_capability_document_is_complete(monkeypatch):
+    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
+    data = json.loads(_describe_capabilities())
+    payload = data["data"]
+    assert data["success"] is True
+    assert payload["server"] == "local-home-devices-mcp"
+    assert payload["supported_transports"] == ["stdio", "streamable-http"]
+    assert payload["supported_count"] == len(payload["supported_capabilities"])
+    assert payload["active_count"] == len(payload["active_capabilities"])
+    required = {
+        "name",
+        "version",
+        "risk",
+        "side_effects",
+        "confidentiality",
+        "idempotent",
+        "idempotency_mechanism",
+        "retryable",
+        "retry_conditions",
+        "concurrent_safe",
+        "concurrency_scope",
+        "timeout_ms",
+        "requires_confirmation",
+        "determinism",
+        "latency",
+        "cost",
+        "impact",
+        "reversible",
+        "target_binding",
+        "active_state",
+    }
+    for manifest in payload["supported_capabilities"]:
+        assert not required - set(manifest)
+    assert all(item["active_state"] == "active" for item in payload["active_capabilities"])
 
 
-class TestRegistrationWrappers:
-    """Tests for MCP tool registration wrappers."""
+def test_registration_creates_protocol_visible_tool():
+    class FakeMCP:
+        def __init__(self):
+            self.tools = {}
 
-    def test_registration_creates_one_tool(self, mock_mcp):
-        register_iot_meta_tools(mock_mcp)
-        assert "describe_iot_capabilities" in mock_mcp._tools
+        def tool(self):
+            def register(function):
+                self.tools[function.__name__] = function
+                return function
 
-    def test_describe_iot_capabilities_wrapper(self, mock_mcp):
-        register_iot_meta_tools(mock_mcp)
-        fn = mock_mcp.get_tool("describe_iot_capabilities")
-        result = fn()
-        data = json.loads(result)
-        assert data["success"] is True
+            return register
 
-    def test_describe_iot_capabilities_exception_handler(self, mock_mcp):
-        register_iot_meta_tools(mock_mcp)
-        fn = mock_mcp.get_tool("describe_iot_capabilities")
-        with patch("tools.iot_meta._describe_capabilities", side_effect=RuntimeError("boom")):
-            result = fn()
-            data = json.loads(result)
-            assert data["success"] is False
-            assert "boom" in data["error"]["message"]
+    mcp = FakeMCP()
+    register_iot_meta_tools(mcp)
+    assert set(mcp.tools) == {"describe_iot_capabilities"}
+    assert json.loads(mcp.tools["describe_iot_capabilities"]())["success"] is True

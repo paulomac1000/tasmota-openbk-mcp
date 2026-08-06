@@ -1,63 +1,28 @@
-name: Auto-tag on merge to main
+name: Validate release request
 
 on:
-  pull_request:
-    branches: [main]
-    types: [closed]
   workflow_dispatch:
     inputs:
       version:
-        description: 'Semantic version (e.g. 1.2.3)'
+        description: SemVer version without leading v
         required: true
         type: string
 
-concurrency:
-  group: auto-tag-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+permissions:
+  contents: read
 
 jobs:
-  tag:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+  validate:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
-
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Determine release version
-        id: version
-        run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          fi
-          echo "Using version: $(grep version= $GITHUB_OUTPUT | cut -d= -f2)"
-
-      - name: Create and push tag
+      - name: Validate version only
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ steps.version.outputs.version }} already exists — skipping"
-            exit 0
-          fi
-          git -c user.name="local-home-devices-mcp-bot" -c user.email="bot@local-home-devices-mcp.local" tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git "v${{ steps.version.outputs.version }}"
+          VERSION: ${{ inputs.version }}
+        run: '[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]'
 
-      - name: Trigger downstream publish
+      - name: Explain protected release flow
         run: |
-          gh workflow run publish.yml \
-            --ref "v${{ steps.version.outputs.version }}" \
-            || echo "::warning::Publish workflow trigger failed or workflow not found"
-        env:
-          GH_TOKEN: ${{ github.token }}
+          echo "Tags are not created automatically before CI."
+          echo "Create an annotated tag only after the main-branch sha image exists."
+          echo "The promotion workflow reuses that exact registry digest."
