@@ -233,7 +233,7 @@ def capability_document(settings: Settings | None = None) -> str:
             "schema_version": "2.0",
             "server_version": "2.0.0",
             "sdk_family": "fastmcp",
-            "sdk_version": "3.4.4",
+            "sdk_version": "3.4.6",
             "supported_transports": ["stdio", "streamable-http"],
             "active_transport": settings.transport,
             "capabilities": list(normalize_catalog(raw).values()),
