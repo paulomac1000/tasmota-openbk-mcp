@@ -29,6 +29,6 @@ def test_composition_uses_official_transports():
 def test_fastmcp_security_floor_and_v3_visibility_api():
     project = Path("pyproject.toml").read_text(encoding="utf-8")
     composition = Path("local_home_devices_mcp/composition.py").read_text(encoding="utf-8")
-    assert '"fastmcp==3.4.5"' in project
+    assert '"fastmcp==3.4.4"' in project
     assert 'mcp.disable(keys={f"tool:{name}"})' in composition
     assert "remove_tool(" not in composition
