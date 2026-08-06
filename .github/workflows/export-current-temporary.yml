@@ -1,0 +1,28 @@
+name: Export current source temporary
+
+on:
+  pull_request:
+    branches:
+      - agent/ai-skills-compliance-refactor
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+        with:
+          persist-credentials: false
+      - name: Archive source
+        run: |
+          git archive --format=tar.gz --output=source.tar.gz HEAD
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: current-source-${{ github.sha }}
+          path: source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
