@@ -9,7 +9,7 @@ description = "Policy-governed MCP server for local home devices"
 requires-python = ">=3.12"
 dependencies = [
   "defusedxml==0.7.1",
-  "fastmcp==3.4.5",
+  "fastmcp==3.4.4",
   "paho-mqtt==2.1.0",
   "pydantic==2.12.0",
   "requests==2.32.5",
