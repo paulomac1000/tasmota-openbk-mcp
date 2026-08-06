@@ -1,33 +1,19 @@
 ---
-description: Define the required capability manifest and runtime mappings.
-doc_id: contract.local-home-devices-capabilities
-type: contract
+description: Define capability manifests, active-state rules, errors, targets, and retries.
+doc_id: reference.capability-contract
+type: reference
 status: evolving
-rigor: normative
+rigor: operational
 owners: [repository-maintainers]
-verification: Run `pytest tests/unit/test_manifests.py tests/unit/test_policy.py` and inspect `/ready`.
+verification: Enumerate registered and active components and run positive plus negative tests for every reactivated capability.
 ---
 
 # Capability contract
 
-## Required fields
+Every registered tool has an application-owned manifest containing risk, side effects, confidentiality, idempotency mechanism, retry conditions, concurrency scope, deadline, target binding, reversibility, and active state.
 
-Every public tool has one application-owned manifest containing name, version, risk, side effects, confidentiality, idempotency and mechanism, retry policy, concurrency and scope, enforced timeout, confirmation hint, determinism, latency, cost, impact, reversibility, target binding, and active state.
+Positive semantic claims are operation-specific. Legacy READ or WRITE factories are not evidence. `iot_set_power` is active because explicit `ON`/`OFF` is naturally idempotent, it is target-bound, serialized per stable target, non-retryable, and covered by mocked adapter tests. `TOGGLE` remains rejected.
 
-## Conservative semantics
+Legacy JSON envelopes are converted before MCP registration: successful payloads become typed data and `success:false` becomes a `ToolError`. New wrappers return typed values and let the MCP boundary map typed exceptions.
 
-A class factory cannot prove semantic safety. Mutating tools default to non-retryable, non-concurrent, and non-reversible until operation-specific tests prove otherwise. Raw commands, firmware updates, factory reset, arbitrary file output, and privileged container access are inactive by default.
-
-## Runtime mapping
-
-- `active_state` controls invocation and readiness.
-- `timeout_ms` bounds downstream timeout arguments and lock acquisition.
-- `concurrent_safe: false` maps to a target-keyed lock.
-- `side_effects` maps to operator and scope gates.
-- `target_binding` maps to exact resolution and pre-I/O identity revalidation.
-- `confidentiality` maps to minimization, redaction, retention, and audit behavior.
-- `retryable` never authorizes blind retry after an ambiguous mutation outcome.
-
-## Compatibility
-
-The capability schema version is independent of the package version. Removing legacy transports, removing `force`, changing target selection from partial to exact, and replacing paths with artifact IDs are intentional breaking changes documented in the migration guide.
+Inactive tools are disabled through the public FastMCP visibility API, so discovery and invocation agree. Changing `active_state` alone is insufficient: a capability also needs target-bound runtime integration, positive and negative tests, timeout behavior, and operation-specific manifest evidence.

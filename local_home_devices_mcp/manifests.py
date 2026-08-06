@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any, Mapping
 
 ALLOWED_RISKS = {"READ", "WRITE", "DESTRUCTIVE", "DANGEROUS", "SENSITIVE"}
@@ -18,63 +17,33 @@ ALLOWED_CONFIDENTIALITY = {
 }
 ALLOWED_ACTIVE_STATES = {"active", "disabled", "degraded", "unavailable", "deprecated"}
 
+_DEFAULT_RETRY_CONDITIONS = {
+    "categories": [],
+    "max_attempts": 1,
+    "backoff_ms": 0,
+    "reconciliation": "required-before-retry",
+}
+_DEFAULT_TARGET_BINDING = {
+    "selector": "exact-device-id-or-authorized-address",
+    "revalidate_before_io": True,
+    "silent_fallback": False,
+}
+
 
 class ManifestError(ValueError):
-    """Raised when a capability manifest is missing or inconsistent."""
-
-
-@dataclass(frozen=True, slots=True)
-class RetryConditions:
-    categories: tuple[str, ...] = ()
-    max_attempts: int = 1
-    backoff_ms: int = 0
-    reconciliation: str = "required-before-retry"
-
-    def as_dict(self) -> dict[str, Any]:
-        return {
-            "categories": list(self.categories),
-            "max_attempts": self.max_attempts,
-            "backoff_ms": self.backoff_ms,
-            "reconciliation": self.reconciliation,
-        }
-
-
-def _default_confidentiality(name: str, manifest: Mapping[str, Any]) -> str:
-    overrides = {
-        "hikvision_take_snapshot": "personal",
-        "hikvision_snapshot_to_file": "personal",
-        "hikvision_container_logs": "sensitive",
-        "hikvision_get_alarm_server": "sensitive",
-        "openhasp_screenshot": "personal",
-        "iot_tuya_cloud_refresh_keys": "credential",
-        "iot_configure_mqtt": "credential",
-    }
-    if name in overrides:
-        return overrides[name]
-    privacy = str(manifest.get("confidentiality", manifest.get("privacy", "public")))
-    return {"none": "public"}.get(privacy, privacy)
+    """Raised when a capability manifest is incomplete or inconsistent."""
 
 
 def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
-    """Upgrade a legacy manifest to the complete conservative contract."""
-
+    """Upgrade one legacy manifest to a conservative application contract."""
     manifest = deepcopy(dict(raw))
-    risk = str(manifest.get("risk", "")).upper()
+    risk = str(manifest.get("risk", "READ")).upper()
     side_effects = str(manifest.get("side_effects", "read"))
-    if risk not in ALLOWED_RISKS:
-        raise ManifestError(f"{name}: invalid or missing risk")
-    if side_effects not in ALLOWED_SIDE_EFFECTS:
-        raise ManifestError(f"{name}: invalid side_effects")
-
-    # Discovery currently persists a cache file, so it is not a pure read. Keep it
-    # fail-closed until scanning and persistence are split into separate capabilities.
-    if name == "iot_discover_devices":
-        side_effects = "write"
-        risk = "WRITE"
-        manifest["side_effects"] = side_effects
+    if risk not in ALLOWED_RISKS or side_effects not in ALLOWED_SIDE_EFFECTS:
+        raise ManifestError(f"{name}: invalid risk or side_effects")
 
     mutating = side_effects in {"write", "destructive"}
-    dangerous = risk == "DANGEROUS" or name in {
+    dangerous_names = {
         "iot_execute_command",
         "openhasp_ota_update",
         "openhasp_factory_reset",
@@ -87,8 +56,7 @@ def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         "iot_tuya_set_dp",
         "iot_tuya_cloud_refresh_keys",
     }
-    degraded_adapter = name in {"iot_set_brightness"}
-    privileged_adapter = name in {
+    privileged = {
         "hikvision_container_status",
         "hikvision_container_logs",
         "hikvision_check_vmd",
@@ -96,62 +64,95 @@ def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         "hikvision_isapi_health",
         "hikvision_pipeline_diagnose",
     }
-    unbound_host_adapter = name.startswith("openhasp_")
-    legacy_mutation = mutating and not name.startswith("mock_")
-    if dangerous:
+    unbound_openhasp = name.startswith("openhasp_")
+
+    if name == "iot_discover_devices":
+        risk, side_effects, mutating = "WRITE", "write", True
+    if name in dangerous_names:
         risk = "DANGEROUS"
-    forced_inactive = dangerous or privileged_adapter or unbound_host_adapter or legacy_mutation
-    if name.startswith("mock_"):
-        active_state = str(manifest.get("active_state", "active"))
-    elif forced_inactive:
-        active_state = "disabled" if not degraded_adapter else "degraded"
-    else:
-        active_state = str(manifest.get("active_state", "active"))
+
+    migrated_mutations = {"iot_set_power"}
+    legacy_mutation = (
+        mutating and not name.startswith("mock_") and name not in migrated_mutations
+    )
+    forced_inactive = (
+        name in dangerous_names
+        or name in privileged
+        or unbound_openhasp
+        or legacy_mutation
+    )
+    active_state = "disabled" if forced_inactive else str(
+        manifest.get("active_state", "active")
+    )
+
+    confidentiality_overrides = {
+        "hikvision_take_snapshot": "personal",
+        "hikvision_snapshot_to_file": "personal",
+        "hikvision_container_logs": "sensitive",
+        "hikvision_get_alarm_server": "sensitive",
+        "openhasp_screenshot": "personal",
+        "iot_tuya_cloud_refresh_keys": "credential",
+        "iot_configure_mqtt": "credential",
+        "mock_capture_snapshot": "personal",
+    }
+    confidentiality = confidentiality_overrides.get(
+        name,
+        str(manifest.get("confidentiality", manifest.get("privacy", "public"))),
+    )
+    if confidentiality == "none":
+        confidentiality = "public"
+
+    mock = name.startswith("mock_")
+    verified_explicit_set = name == "iot_set_power"
+    retry_conditions = (
+        manifest.get("retry_conditions", deepcopy(_DEFAULT_RETRY_CONDITIONS))
+        if mock
+        else deepcopy(_DEFAULT_RETRY_CONDITIONS)
+    )
+    target_binding = manifest.get(
+        "target_binding", deepcopy(_DEFAULT_TARGET_BINDING)
+    )
 
     manifest.update(
         {
             "name": name,
             "risk": risk,
-            "confidentiality": _default_confidentiality(name, manifest),
-            # Positive safety claims are retained only for the in-memory mock
-            # capabilities whose semantics are executable in this repository. Legacy
-            # adapters must earn these claims with operation-specific evidence.
+            "side_effects": side_effects,
+            "confidentiality": confidentiality,
             "idempotent": (
-                bool(manifest.get("idempotent", False)) if name.startswith("mock_") else False
+                bool(manifest.get("idempotent", False))
+                if mock
+                else verified_explicit_set
             ),
             "idempotency_mechanism": (
                 manifest.get("idempotency_mechanism", "natural")
-                if name.startswith("mock_") and manifest.get("idempotent")
+                if mock and manifest.get("idempotent")
+                else "explicit-target-state"
+                if verified_explicit_set
                 else "none"
             ),
-            "retryable": (
-                bool(manifest.get("retryable", False)) if name.startswith("mock_") else False
-            ),
-            "retry_conditions": (
-                manifest.get("retry_conditions", RetryConditions().as_dict())
-                if name.startswith("mock_")
-                else RetryConditions().as_dict()
-            ),
+            "retryable": bool(manifest.get("retryable", False)) if mock else False,
+            "retry_conditions": retry_conditions,
             "concurrent_safe": (
-                bool(manifest.get("concurrent_safe", False))
-                if name.startswith("mock_")
-                else False
+                bool(manifest.get("concurrent_safe", False)) if mock else False
             ),
             "concurrency_scope": manifest.get("concurrency_scope", "target"),
             "timeout_ms": int(manifest.get("timeout_ms", 10_000)),
-            "requires_confirmation": bool(manifest.get("requires_confirmation", mutating)),
+            "requires_confirmation": bool(
+                manifest.get("requires_confirmation", mutating)
+            ),
             "reversible": (
-                bool(manifest.get("reversible", False)) if name.startswith("mock_") else False
+                bool(manifest.get("reversible", False)) if mock else False
             ),
-            "target_binding": manifest.get(
-                "target_binding",
-                {
-                    "selector": "exact-device-id-or-authorized-address",
-                    "revalidate_before_io": True,
-                    "silent_fallback": False,
-                },
-            ),
+            "target_binding": target_binding,
             "active_state": active_state,
+            "determinism": manifest.get("determinism", "environment-dependent"),
+            "latency": manifest.get("latency", "network"),
+            "cost": manifest.get("cost", "local-network"),
+            "impact": manifest.get(
+                "impact", "none" if not mutating else "device-state"
+            ),
+            "version": str(manifest.get("version", "2.0.0")),
         }
     )
     validate_manifest(manifest)
@@ -159,6 +160,7 @@ def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> None:
+    """Reject missing fields and unsafe semantic combinations."""
     required = {
         "name",
         "version",
@@ -181,9 +183,10 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         "target_binding",
         "active_state",
     }
-    missing = sorted(required - set(manifest))
+    missing = required - set(manifest)
     if missing:
-        raise ManifestError(f"{manifest.get('name', '<unknown>')}: missing {missing}")
+        name = manifest.get("name", "<unknown>")
+        raise ManifestError(f"{name}: missing {sorted(missing)}")
     if manifest["risk"] not in ALLOWED_RISKS:
         raise ManifestError("invalid risk")
     if manifest["side_effects"] not in ALLOWED_SIDE_EFFECTS:
@@ -198,13 +201,14 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         raise ManifestError("mutating capabilities default to retryable=false")
 
 
-def normalize_catalog(raw_catalog: Mapping[str, Mapping[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Return a validated catalog and reject name mismatches."""
-
+def normalize_catalog(
+    raw_catalog: Mapping[str, Mapping[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Normalize a complete catalog and reject key/name mismatches."""
     result: dict[str, dict[str, Any]] = {}
     for name, raw in raw_catalog.items():
         declared = raw.get("name")
         if declared not in {None, name}:
-            raise ManifestError(f"{name}: manifest name mismatch ({declared!r})")
+            raise ManifestError(f"{name}: manifest name mismatch")
         result[name] = normalize_manifest(name, raw)
     return result

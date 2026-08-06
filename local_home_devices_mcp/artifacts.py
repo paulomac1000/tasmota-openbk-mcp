@@ -1,14 +1,16 @@
-"""Confined artifact storage for snapshots and downloaded device files."""
+"""Confined artifact storage with opaque IDs, metadata, retention, and quotas."""
 
 from __future__ import annotations
 
 import hashlib
+import json
 import os
-from pathlib import Path
-import re
 import secrets
-from dataclasses import dataclass
-from typing import BinaryIO
+import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from threading import RLock
+from typing import Iterator
 
 
 class ArtifactError(ValueError):
@@ -16,57 +18,164 @@ class ArtifactError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class Artifact:
+class ArtifactMetadata:
     artifact_id: str
-    path: Path
+    owner_subject: str
+    target_id: str | None
+    operation: str
     media_type: str
-    size_bytes: int
+    size: int
     sha256: str
+    created_at: float
+    expires_at: float
 
 
 class ArtifactStore:
-    """Write-only-by-ID store that never accepts caller-provided paths."""
-
-    def __init__(self, root: Path, max_bytes: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        max_artifact_bytes: int,
+        max_store_bytes: int,
+        retention_seconds: int,
+    ) -> None:
         self.root = root.resolve()
-        self.max_bytes = max_bytes
+        self.max_artifact_bytes = max_artifact_bytes
+        self.max_store_bytes = max_store_bytes
+        self.retention_seconds = retention_seconds
+        self._lock = RLock()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
             os.chmod(self.root, 0o700)
         except OSError:
             pass
 
-    def save_bytes(self, data: bytes, *, media_type: str, suffix: str) -> Artifact:
-        if len(data) > self.max_bytes:
-            raise ArtifactError(f"artifact exceeds {self.max_bytes} byte limit")
-        if not suffix.startswith(".") or "/" in suffix or "\\" in suffix or len(suffix) > 12:
-            raise ArtifactError("invalid artifact suffix")
-        artifact_id = f"art_{secrets.token_urlsafe(18)}"
-        final_path = self.root / f"{artifact_id}{suffix}"
-        if final_path.parent != self.root:
-            raise ArtifactError("artifact path escaped root")
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        if hasattr(os, "O_NOFOLLOW"):
-            flags |= os.O_NOFOLLOW
-        fd = os.open(final_path, flags, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as stream:
-                stream.write(data)
-                stream.flush()
-                os.fsync(stream.fileno())
-        except BaseException:
-            final_path.unlink(missing_ok=True)
-            raise
-        digest = hashlib.sha256(data).hexdigest()
-        return Artifact(artifact_id, final_path, media_type, len(data), digest)
-
-    def open(self, artifact_id: str) -> BinaryIO:
-        if not re.fullmatch(r"art_[A-Za-z0-9_-]{16,64}", artifact_id):
+    def _paths(self, artifact_id: str) -> tuple[Path, Path]:
+        if not artifact_id.startswith("art_") or not artifact_id[4:].isalnum():
             raise ArtifactError("invalid artifact id")
-        matches = list(self.root.glob(f"{artifact_id}.*"))
-        if len(matches) != 1:
-            raise ArtifactError("artifact not found or ambiguous")
-        resolved = matches[0].resolve(strict=True)
-        if resolved.parent != self.root:
-            raise ArtifactError("artifact escaped root")
-        return resolved.open("rb")
+        data = (self.root / f"{artifact_id}.bin").resolve()
+        meta = (self.root / f"{artifact_id}.json").resolve()
+        if not data.is_relative_to(self.root) or not meta.is_relative_to(self.root):
+            raise ArtifactError("artifact escaped configured root")
+        return data, meta
+
+    def _current_size(self) -> int:
+        return sum(path.stat().st_size for path in self.root.glob("art_*.bin") if path.is_file())
+
+    def cleanup(self, now: float | None = None) -> int:
+        now = time.time() if now is None else now
+        removed = 0
+        with self._lock:
+            for meta_path in self.root.glob("art_*.json"):
+                try:
+                    payload = json.loads(meta_path.read_text(encoding="utf-8"))
+                    if float(payload["expires_at"]) > now:
+                        continue
+                    data_path, expected_meta = self._paths(str(payload["artifact_id"]))
+                    if expected_meta != meta_path.resolve():
+                        continue
+                    data_path.unlink(missing_ok=True)
+                    meta_path.unlink(missing_ok=True)
+                    removed += 1
+                except (OSError, ValueError, KeyError, json.JSONDecodeError):
+                    continue
+        return removed
+
+    def save(
+        self,
+        content: bytes,
+        media_type: str,
+        *,
+        owner_subject: str,
+        operation: str,
+        target_id: str | None = None,
+    ) -> ArtifactMetadata:
+        if not isinstance(content, bytes):
+            raise ArtifactError("artifact content must be bytes")
+        if not content:
+            raise ArtifactError("artifact content must not be empty")
+        if len(content) > self.max_artifact_bytes:
+            raise ArtifactError("artifact exceeds per-item limit")
+        if not media_type or len(media_type) > 128:
+            raise ArtifactError("invalid media type")
+        if not owner_subject or len(owner_subject) > 256:
+            raise ArtifactError("invalid artifact owner")
+        if not operation or len(operation) > 128:
+            raise ArtifactError("invalid artifact operation")
+        now = time.time()
+        with self._lock:
+            self.cleanup(now)
+            if self._current_size() + len(content) > self.max_store_bytes:
+                raise ArtifactError("artifact store quota exceeded")
+            artifact_id = f"art_{secrets.token_hex(16)}"
+            data_path, meta_path = self._paths(artifact_id)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(data_path, flags, 0o600)
+            try:
+                with os.fdopen(fd, "wb", closefd=True) as handle:
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                data_path.unlink(missing_ok=True)
+                raise
+            metadata = ArtifactMetadata(
+                artifact_id=artifact_id,
+                owner_subject=owner_subject,
+                target_id=target_id,
+                operation=operation,
+                media_type=media_type,
+                size=len(content),
+                sha256=hashlib.sha256(content).hexdigest(),
+                created_at=now,
+                expires_at=now + self.retention_seconds,
+            )
+            meta_path.write_text(json.dumps(asdict(metadata), sort_keys=True), encoding="utf-8")
+            try:
+                os.chmod(meta_path, 0o600)
+            except OSError:
+                pass
+            return metadata
+
+    def metadata(self, artifact_id: str) -> ArtifactMetadata:
+        data_path, meta_path = self._paths(artifact_id)
+        try:
+            payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            metadata = ArtifactMetadata(**payload)
+        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ArtifactError("artifact not found") from exc
+        if metadata.expires_at <= time.time():
+            data_path.unlink(missing_ok=True)
+            meta_path.unlink(missing_ok=True)
+            raise ArtifactError("artifact expired")
+        return metadata
+
+    def read(
+        self,
+        artifact_id: str,
+        *,
+        requester_subject: str,
+        allow_admin: bool = False,
+    ) -> tuple[ArtifactMetadata, bytes]:
+        metadata = self.metadata(artifact_id)
+        if not allow_admin and metadata.owner_subject != requester_subject:
+            raise ArtifactError("artifact is not owned by this principal")
+        data_path, _ = self._paths(artifact_id)
+        try:
+            content = data_path.read_bytes()
+        except OSError as exc:
+            raise ArtifactError("artifact not found") from exc
+        if len(content) != metadata.size or hashlib.sha256(content).hexdigest() != metadata.sha256:
+            raise ArtifactError("artifact integrity check failed")
+        return metadata, content
+
+    def iter_metadata(self) -> Iterator[ArtifactMetadata]:
+        self.cleanup()
+        for path in sorted(self.root.glob("art_*.json")):
+            artifact_id = path.stem
+            try:
+                yield self.metadata(artifact_id)
+            except ArtifactError:
+                continue

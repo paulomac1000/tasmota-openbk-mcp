@@ -6,7 +6,7 @@ import hashlib
 import ipaddress
 import re
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Protocol
 
 from .config import Settings
 
@@ -14,7 +14,7 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_. -]{0,127}$")
 
 
 class TargetError(ValueError):
-    """Base target resolution failure."""
+    pass
 
 
 class TargetNotFound(TargetError):
@@ -37,26 +37,27 @@ class BoundTarget:
     fingerprint: str
 
 
+class TargetResolver(Protocol):
+    async def resolve(self, selector: str) -> BoundTarget: ...
+
+    async def revalidate(self, target: BoundTarget) -> None: ...
+
+
 def _fingerprint(device: Mapping[str, Any]) -> str:
     identity = "|".join(
-        str(device.get(key, ""))
-        for key in ("device_id", "mac", "serial", "type", "name")
+        str(device.get(key, "")) for key in ("device_id", "mac", "serial", "type", "name")
     )
     if not identity.strip("|"):
         raise TargetError("device has no stable identity attributes")
-    return hashlib.sha256(identity.encode("utf-8")).hexdigest()
+    return hashlib.sha256(identity.encode()).hexdigest()
 
 
 def target_id_for(device: Mapping[str, Any]) -> str:
     explicit = str(device.get("target_id", "")).strip()
-    if explicit:
-        return explicit
-    return f"dev_{_fingerprint(device)[:20]}"
+    return explicit or f"dev_{_fingerprint(device)[:20]}"
 
 
 def validate_address(address: str, settings: Settings) -> str:
-    """Validate a literal IPv4 address against the operator allowlist."""
-
     try:
         parsed = ipaddress.ip_address(address.strip())
     except ValueError as exc:
@@ -83,25 +84,22 @@ def normalize_selector(selector: str) -> str:
 
 
 def resolve_exact_target(
-    selector: str,
-    devices: Iterable[Mapping[str, Any]],
-    settings: Settings,
+    selector: str, devices: Iterable[Mapping[str, Any]], settings: Settings
 ) -> BoundTarget:
-    """Resolve an exact target without partial-name or silent fallback behavior."""
-
     normalized = normalize_selector(selector)
     records = list(devices)
-    matches: list[Mapping[str, Any]] = []
-    selector_is_ip = False
     try:
         parsed_selector = ipaddress.ip_address(normalized)
     except ValueError:
         parsed_selector = None
-
     if parsed_selector is not None:
-        ip = str(parsed_selector)
-        selector_is_ip = True
-        matches = [d for d in records if str(d.get("ip", "")).strip() == ip]
+        if not settings.allow_direct_ip_targets:
+            raise TargetNotFound(f"{selector!r}: direct IP targets are disabled")
+        matches = [
+            device
+            for device in records
+            if str(device.get("ip", "")).strip() == str(parsed_selector)
+        ]
     else:
         matches = [
             d
@@ -112,18 +110,16 @@ def resolve_exact_target(
                 str(d.get("name", "")).strip().casefold(),
             }
         ]
-
     if not matches:
-        if selector_is_ip and not settings.allow_direct_ip_targets:
+        if parsed_selector is not None and not settings.allow_direct_ip_targets:
             reason = "direct IP targets are disabled"
-        elif selector_is_ip:
+        elif parsed_selector is not None:
             reason = "address is not bound to a discovered stable target"
         else:
             reason = "no exact target match"
         raise TargetNotFound(f"{selector!r}: {reason}")
     if len(matches) > 1:
         raise AmbiguousTarget(f"{selector!r} matched {len(matches)} devices")
-
     device = matches[0]
     address = validate_address(str(device.get("ip", "")), settings)
     return BoundTarget(
@@ -135,8 +131,6 @@ def resolve_exact_target(
 
 
 def revalidate_binding(bound: BoundTarget, current: Mapping[str, Any], settings: Settings) -> None:
-    """Fail closed when address-to-identity mapping changed before I/O."""
-
     address = validate_address(str(current.get("ip", "")), settings)
     if address != bound.address:
         raise TargetNotAuthorized("target address changed after authorization")

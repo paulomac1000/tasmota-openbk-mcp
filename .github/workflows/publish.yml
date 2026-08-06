@@ -1,4 +1,4 @@
-name: Promote tested image
+name: Promote exact release image
 
 on:
   push:
@@ -6,90 +6,83 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: SemVer tag without leading v
+        description: Version to promote, without v prefix
         required: true
         type: string
       revision:
-        description: Full tested commit SHA on main
+        description: Exact tested main commit SHA
         required: true
         type: string
 
 permissions:
   contents: read
-
-concurrency:
-  group: promote-${{ github.ref }}
-  cancel-in-progress: false
-
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  packages: write
+  actions: read
+  attestations: read
+  id-token: write
 
 jobs:
   promote:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
-    environment: release
-    permissions:
-      contents: write
-      packages: write
+    timeout-minutes: 20
     steps:
-      - name: Resolve and validate release identity
-        id: identity
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Resolve version and immutable revision
+        id: release
         env:
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_REVISION: ${{ inputs.revision }}
         run: |
           if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             VERSION="${GITHUB_REF_NAME#v}"
-            REVISION="${GITHUB_SHA}"
+            REVISION="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
           else
             VERSION="${INPUT_VERSION}"
             REVISION="${INPUT_REVISION}"
           fi
-          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]
+          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           [[ "${REVISION}" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "${REVISION}" origin/main
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
           echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
-
-      - name: Check out the exact release revision
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
-        with:
-          ref: ${{ steps.identity.outputs.revision }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Verify revision and package version
+      - name: Download identity emitted by successful CI for the exact revision
         env:
-          VERSION: ${{ steps.identity.outputs.version }}
-          REVISION: ${{ steps.identity.outputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+          REVISION: ${{ steps.release.outputs.revision }}
         run: |
-          test "$(git rev-parse HEAD)" = "${REVISION}"
-          git merge-base --is-ancestor "${REVISION}" origin/main
-          PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          test "${PACKAGE_VERSION}" = "${VERSION}"
-
+          RUN_ID="$(gh run list --workflow CI --commit "${REVISION}" --status success \
+            --json databaseId,headSha \
+            --jq ".[] | select(.headSha == \"${REVISION}\") | .databaseId" | head -n 1)"
+          test -n "${RUN_ID}" && test "${RUN_ID}" != "null"
+          gh run download "${RUN_ID}" --name "image-identity-${REVISION}" --dir release-identity
+      - name: Verify exact digest and provenance
+        id: identity
+        env:
+          REVISION: ${{ steps.release.outputs.revision }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          IDENTITY="$(sed -n '1p' release-identity/image-identity.txt)"
+          RECORDED_REVISION="$(sed -n 's/^revision=//p' release-identity/image-identity.txt)"
+          [[ "${IDENTITY}" =~ ^ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[0-9a-f]{64}$ ]]
+          test "${RECORDED_REVISION}" = "${REVISION}"
+          gh attestation verify "${IDENTITY}" --repo "${GITHUB_REPOSITORY}"
+          echo "identity=${IDENTITY}" >> "${GITHUB_OUTPUT}"
       - name: Log in to GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Promote the tested manifest without rebuilding
+      - name: Promote exact digest without rebuilding or tag resolution
         env:
-          VERSION: ${{ steps.identity.outputs.version }}
-          REVISION: ${{ steps.identity.outputs.revision }}
+          VERSION: ${{ steps.release.outputs.version }}
+          IDENTITY: ${{ steps.identity.outputs.identity }}
         run: |
-          SOURCE="ghcr.io/${GITHUB_REPOSITORY,,}:sha-${REVISION}"
-          docker buildx imagetools inspect "${SOURCE}"
+          REPOSITORY="${IDENTITY%@*}"
           docker buildx imagetools create \
-            --tag "ghcr.io/${GITHUB_REPOSITORY,,}:${VERSION}" \
-            --tag "ghcr.io/${GITHUB_REPOSITORY,,}:latest" \
-            "${SOURCE}"
-
-      - name: Create release for a version tag
-        if: github.ref_type == 'tag'
-        uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3
-        with:
-          generate_release_notes: true
-          make_latest: true
+            --tag "${REPOSITORY}:${VERSION}" \
+            --tag "${REPOSITORY}:latest" \
+            "${IDENTITY}"
