@@ -48,6 +48,7 @@ A schema-valid `adoption-assessment.yaml` is intentionally not committed yet. Th
 identities even when the result is `not-run` or the decision is `request-changes`. Inventing those
 values would be false evidence. A trusted verifier must generate the assessment after CI and an
 independent review exist.
+The public pull request remains a draft until those hosted checks and review are complete.
 
 Real-device checks are separately enumerated in `tests/real_system_todos.py` and remain blocking
 for claims about physical target identity, ambiguous mutation outcomes, expected disconnects,
