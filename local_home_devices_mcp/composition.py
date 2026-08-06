@@ -60,7 +60,19 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
         or "authenticated"
     )
     scopes = frozenset(str(item) for item in (getattr(token, "scopes", None) or []))
-    return Principal(subject=subject, scopes=scopes, transport="http")
+    raw_targets = claims.get("targets")
+    if raw_targets is None or raw_targets == "*":
+        target_ids = None
+    elif isinstance(raw_targets, str):
+        target_ids = frozenset({raw_targets})
+    else:
+        target_ids = frozenset(str(item) for item in raw_targets)
+    return Principal(
+        subject=subject,
+        scopes=scopes,
+        transport="http",
+        target_ids=target_ids,
+    )
 
 
 def _install_policy_middleware(mcp: Any, gate: OperationGate, settings: Settings) -> None:
