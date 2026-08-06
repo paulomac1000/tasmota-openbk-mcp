@@ -1,1 +1,1 @@
-"""End-to-end tests for local-home-devices-mcp."""
+"""Official-client end-to-end protocol tests."""

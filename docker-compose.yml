@@ -1,10 +1,24 @@
 services:
   local-home-devices-mcp:
-    image: ghcr.io/paulomac1000/local-home-devices-mcp:latest
-    env_file: .env
-    network_mode: host
+    image: ${MCP_IMAGE:?Set MCP_IMAGE to an immutable ghcr.io image digest}
+    env_file:
+      - .env
+    environment:
+      BIND_HOST: 0.0.0.0
+      MCP_TRANSPORT: http
+      MCP_PORT: 9102
+      MCP_PATH: /mcp
+    ports:
+      - "127.0.0.1:9102:9102"
     volumes:
       - local-home-devices-mcp-data:/app/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
 
 volumes:
