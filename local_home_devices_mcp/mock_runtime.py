@@ -1,89 +1,96 @@
-"""Zero-I/O mock runtime used for local validation and CI smoke tests."""
+"""Deterministic zero-I/O runtime and manifests used by tests and smoke checks."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from copy import deepcopy
 from typing import Any
 
-from .config import Settings
-from .policy import OperationGate, Principal
+from .targeting import BoundTarget, TargetNotFound
 
-
-@dataclass
-class MockDevice:
-    target_id: str = "dev_mock_light"
-    name: str = "Mock Light"
-    ip: str = "192.168.50.10"
-    power: bool = False
-    brightness: int = 50
-
+MOCK_DEVICE = {
+    "target_id": "dev_mock_light",
+    "device_id": "mock-light-001",
+    "mac": "02:00:00:00:01",
+    "serial": "MOCK-001",
+    "type": "mock",
+    "name": "Mock Light",
+    "ip": "192.0.2.10",
+}
 
 MOCK_MANIFESTS: dict[str, dict[str, Any]] = {
     "mock_get_state": {
-        "name": "mock_get_state",
         "version": "2.0.0",
         "risk": "READ",
         "side_effects": "read",
-        "privacy": "none",
+        "privacy": "public",
         "idempotent": True,
-        "retryable": False,
+        "retryable": True,
         "concurrent_safe": True,
         "timeout_ms": 1000,
         "requires_confirmation": False,
         "determinism": "deterministic",
-        "latency": "instant",
-        "cost": "cheap",
+        "latency": "local",
+        "cost": "none",
         "impact": "none",
         "reversible": True,
     },
     "mock_set_power": {
-        "name": "mock_set_power",
         "version": "2.0.0",
         "risk": "WRITE",
         "side_effects": "write",
-        "privacy": "none",
+        "privacy": "public",
         "idempotent": True,
-        "idempotency_mechanism": "natural",
         "retryable": False,
         "concurrent_safe": False,
         "timeout_ms": 1000,
         "requires_confirmation": True,
         "determinism": "deterministic",
-        "latency": "instant",
-        "cost": "cheap",
-        "impact": "transient",
+        "latency": "local",
+        "cost": "none",
+        "impact": "device-state",
+        "reversible": True,
+    },
+    "mock_capture_snapshot": {
+        "version": "2.0.0",
+        "risk": "SENSITIVE",
+        "side_effects": "write",
+        "privacy": "personal",
+        "idempotent": False,
+        "retryable": False,
+        "concurrent_safe": False,
+        "timeout_ms": 1000,
+        "requires_confirmation": True,
+        "determinism": "deterministic",
+        "latency": "local",
+        "cost": "storage",
+        "impact": "artifact",
         "reversible": True,
     },
 }
 
 
-def run_mock_self_test(settings: Settings) -> dict[str, Any]:
-    device = MockDevice()
-    gate = OperationGate(settings, MOCK_MANIFESTS, rate_limit_per_minute=20)
-    principal = Principal(
-        subject="local-mock-test",
-        scopes=frozenset({"devices:read", "devices:write"}),
-        transport="local-test",
-    )
+class MockTargetResolver:
+    """Resolve and revalidate one deterministic device without external I/O."""
 
-    def get_state(identifier: str) -> dict[str, Any]:
-        return {"identifier": identifier, "power": device.power, "brightness": device.brightness}
+    def __init__(self) -> None:
+        self.device = deepcopy(MOCK_DEVICE)
+        self.revalidations = 0
 
-    def set_power(identifier: str, state: bool) -> dict[str, Any]:
-        device.power = state
-        return {"identifier": identifier, "power": device.power}
+    async def resolve(self, selector: str) -> BoundTarget:
+        normalized = selector.strip().casefold()
+        if normalized not in {"dev_mock_light", "mock light", "192.0.2.10"}:
+            raise TargetNotFound(f"{selector!r}: no exact mock target")
+        return BoundTarget(
+            target_id="dev_mock_light",
+            address="192.0.2.10",
+            display_name="Mock Light",
+            fingerprint="mock-fingerprint-v1",
+        )
 
-    before = gate.invoke("mock_get_state", get_state, {"identifier": device.target_id}, principal)
-    after = gate.invoke(
-        "mock_set_power", set_power, {"identifier": device.target_id, "state": True}, principal
-    )
-    restored = gate.invoke(
-        "mock_set_power", set_power, {"identifier": device.target_id, "state": False}, principal
-    )
-    return {
-        "success": restored["power"] is False,
-        "before": before,
-        "after": after,
-        "restored": restored,
-        "io": "mocked",
-    }
+    async def revalidate(self, target: BoundTarget) -> None:
+        self.revalidations += 1
+        if (
+            target.target_id != "dev_mock_light"
+            or target.fingerprint != "mock-fingerprint-v1"
+        ):
+            raise TargetNotFound("mock target binding changed")

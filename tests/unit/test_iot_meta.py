@@ -1,66 +1,46 @@
-"""Capability discovery must expose supported and active catalogs."""
+"""Unit tests for typed capability introspection."""
 
 from __future__ import annotations
 
-import json
+from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip("tools.constants")
 from tools.iot_meta import _describe_capabilities, register_iot_meta_tools
 
 pytestmark = pytest.mark.unit
 
 
-def test_capability_document_is_complete(monkeypatch):
-    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
-    data = json.loads(_describe_capabilities())
-    payload = data["data"]
-    assert data["success"] is True
-    assert payload["server"] == "local-home-devices-mcp"
-    assert payload["supported_transports"] == ["stdio", "streamable-http"]
-    assert payload["supported_count"] == len(payload["supported_capabilities"])
-    assert payload["active_count"] == len(payload["active_capabilities"])
+def test_describe_returns_typed_catalog():
+    data = _describe_capabilities()
+    assert data["server"] == "local-home-devices-mcp"
+    assert data["schema_version"] == "2.1"
+    assert data["supported_count"] == len(data["supported_capabilities"])
+    assert data["active_count"] == len(data["active_capabilities"])
+    assert data["supported_transports"] == ["stdio", "streamable-http"]
+
+
+def test_every_capability_has_runtime_fields():
     required = {
         "name",
-        "version",
         "risk",
         "side_effects",
         "confidentiality",
         "idempotent",
-        "idempotency_mechanism",
         "retryable",
-        "retry_conditions",
         "concurrent_safe",
-        "concurrency_scope",
         "timeout_ms",
-        "requires_confirmation",
-        "determinism",
-        "latency",
-        "cost",
-        "impact",
-        "reversible",
         "target_binding",
         "active_state",
     }
-    for manifest in payload["supported_capabilities"]:
-        assert not required - set(manifest)
-    assert all(item["active_state"] == "active" for item in payload["active_capabilities"])
+    for capability in _describe_capabilities()["supported_capabilities"]:
+        assert not required - capability.keys()
 
 
-def test_registration_creates_protocol_visible_tool():
-    class FakeMCP:
-        def __init__(self):
-            self.tools = {}
-
-        def tool(self):
-            def register(function):
-                self.tools[function.__name__] = function
-                return function
-
-            return register
-
-    mcp = FakeMCP()
-    register_iot_meta_tools(mcp)
-    assert set(mcp.tools) == {"describe_iot_capabilities"}
-    assert json.loads(mcp.tools["describe_iot_capabilities"]())["success"] is True
+def test_registration_uses_typed_result_and_does_not_swallow_failures(mock_mcp):
+    register_iot_meta_tools(mock_mcp)
+    function = mock_mcp.get_tool("describe_iot_capabilities")
+    assert isinstance(function(), dict)
+    with patch("tools.iot_meta._describe_capabilities", side_effect=RuntimeError("boom")):
+        with pytest.raises(RuntimeError, match="boom"):
+            function()

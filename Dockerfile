@@ -1,29 +1,21 @@
-# syntax=docker/dockerfile:1.7
-FROM python:3.14-slim@sha256:44dd04494ee8f3b538294360e7c4b3acb87c8268e4d0a4828a6500b1eff50061
+FROM python:3.13.5-slim@sha256:8df0e8c47e9fdfc3abf4f098453051f8f4c2202be8c0d2d3850058adf3a58517
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN groupadd --system mcp && useradd --system --gid mcp --home /app mcp
+WORKDIR /app
+COPY dist/*.whl /tmp/package.whl
+RUN python -m pip install --no-cache-dir /tmp/package.whl && rm /tmp/package.whl
+RUN mkdir -p /app/data/artifacts && chown -R mcp:mcp /app
+USER mcp
+
+ENV MCP_TRANSPORT=http \
     BIND_HOST=127.0.0.1 \
     MCP_PORT=9102 \
-    MCP_TRANSPORT=http
-
-RUN groupadd --system --gid 10001 mcp \
-    && useradd --system --uid 10001 --gid mcp --create-home --home-dir /app mcp
-
-# CI supplies exactly one wheel built and smoke-tested in the exact-wheel job.
-COPY dist/*.whl /tmp/dist/
-RUN test "$(find /tmp/dist -maxdepth 1 -name '*.whl' | wc -l)" -eq 1 \
-    && python -m pip install /tmp/dist/*.whl \
-    && rm -rf /tmp/dist
-
-WORKDIR /app
-RUN install -d -o mcp -g mcp -m 0700 /app/data /app/data/artifacts
-USER 10001:10001
+    MCP_PATH=/mcp \
+    MCP_ARTIFACT_ROOT=/app/data/artifacts
 
 EXPOSE 9102
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9102/health', timeout=2).read()" || exit 1
-
 ENTRYPOINT ["local-home-devices-mcp"]

@@ -29,10 +29,16 @@ def _int(name: str, default: int, *, minimum: int, maximum: int) -> int:
     return value
 
 
+def _token(value: str | None, name: str) -> str | None:
+    if not value:
+        return None
+    if len(value) < 32:
+        raise ValueError(f"{name} must contain at least 32 characters")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
-    """Immutable settings used by transports and invocation policy."""
-
     transport: Transport
     bind_host: str
     port: int
@@ -43,7 +49,12 @@ class Settings:
     allowed_networks: tuple[ipaddress.IPv4Network, ...]
     artifact_root: Path
     max_artifact_bytes: int
-    auth_token: str | None
+    max_artifact_store_bytes: int
+    artifact_retention_seconds: int
+    read_token: str | None
+    write_token: str | None
+    admin_token: str | None
+    trusted_proxy_tls: bool
     mock_mode: bool
 
     @property
@@ -53,20 +64,54 @@ class Settings:
         except ValueError:
             return self.bind_host == "localhost"
 
+    @property
+    def has_auth(self) -> bool:
+        return any((self.read_token, self.write_token, self.admin_token))
+
     def validate(self) -> None:
-        if self.transport == "http" and not self.is_loopback and not self.auth_token:
-            raise ValueError("MCP_AUTH_TOKEN is required for a non-loopback HTTP bind")
+        if self.transport == "http" and not self.is_loopback:
+            if not self.has_auth:
+                raise ValueError("an MCP auth token is required for a non-loopback HTTP bind")
+            if not self.trusted_proxy_tls:
+                raise ValueError(
+                    "non-loopback HTTP requires MCP_TRUSTED_PROXY_TLS=1 "
+                    "and a TLS-terminating trusted proxy"
+                )
         if not self.mcp_path.startswith("/") or "?" in self.mcp_path or "#" in self.mcp_path:
             raise ValueError("MCP_PATH must be an absolute URL path without query or fragment")
-        if self.auth_token is not None and len(self.auth_token) < 32:
-            raise ValueError("MCP_AUTH_TOKEN must contain at least 32 characters")
         if self.artifact_root == Path("/"):
             raise ValueError("MCP_ARTIFACT_ROOT cannot be the filesystem root")
+        tokens = [token for token in (self.read_token, self.write_token, self.admin_token) if token]
+        if len(tokens) != len(set(tokens)):
+            raise ValueError("read, write, and admin tokens must be distinct")
+
+    def static_tokens(self) -> dict[str, dict[str, object]]:
+        tokens: dict[str, dict[str, object]] = {}
+        if self.read_token:
+            tokens[self.read_token] = {
+                "client_id": "local-home-devices-reader",
+                "scopes": ["devices:read"],
+            }
+        if self.write_token:
+            tokens[self.write_token] = {
+                "client_id": "local-home-devices-writer",
+                "scopes": ["devices:read", "devices:sensitive", "devices:write"],
+            }
+        if self.admin_token:
+            tokens[self.admin_token] = {
+                "client_id": "local-home-devices-admin",
+                "scopes": [
+                    "devices:read",
+                    "devices:sensitive",
+                    "devices:write",
+                    "devices:dangerous",
+                    "devices:admin",
+                ],
+            }
+        return tokens
 
 
 def load_settings() -> Settings:
-    """Load and validate configuration without performing network I/O."""
-
     transport_raw = os.getenv("MCP_TRANSPORT", "http").strip().lower()
     if transport_raw in {"streamable-http", "streamable_http"}:
         transport_raw = "http"
@@ -88,7 +133,8 @@ def load_settings() -> Settings:
     if not networks:
         raise ValueError("MCP_ALLOWED_TARGET_NETWORKS must contain at least one network")
 
-    token = os.getenv("MCP_AUTH_TOKEN") or None
+    legacy = _token(os.getenv("MCP_AUTH_TOKEN"), "MCP_AUTH_TOKEN")
+    read_token = _token(os.getenv("MCP_AUTH_READ_TOKEN") or legacy, "MCP_AUTH_READ_TOKEN")
     settings = Settings(
         transport=transport_raw,  # type: ignore[arg-type]
         bind_host=os.getenv("BIND_HOST", "127.0.0.1"),
@@ -102,7 +148,19 @@ def load_settings() -> Settings:
         max_artifact_bytes=_int(
             "MCP_MAX_ARTIFACT_BYTES", 8 * 1024 * 1024, minimum=1024, maximum=64 * 1024 * 1024
         ),
-        auth_token=token,
+        max_artifact_store_bytes=_int(
+            "MCP_MAX_ARTIFACT_STORE_BYTES",
+            128 * 1024 * 1024,
+            minimum=1024,
+            maximum=4 * 1024 * 1024 * 1024,
+        ),
+        artifact_retention_seconds=_int(
+            "MCP_ARTIFACT_RETENTION_SECONDS", 86400, minimum=60, maximum=31 * 86400
+        ),
+        read_token=read_token,
+        write_token=_token(os.getenv("MCP_AUTH_WRITE_TOKEN"), "MCP_AUTH_WRITE_TOKEN"),
+        admin_token=_token(os.getenv("MCP_AUTH_ADMIN_TOKEN"), "MCP_AUTH_ADMIN_TOKEN"),
+        trusted_proxy_tls=_bool("MCP_TRUSTED_PROXY_TLS", False),
         mock_mode=_bool("MCP_MOCK_MODE", False),
     )
     settings.validate()

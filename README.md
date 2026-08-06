@@ -1,106 +1,58 @@
 ---
-description: Run and operate the policy-governed MCP server for local home devices.
-doc_id: guide.local-home-devices-mcp
+description: Operate and develop the policy-governed MCP server for local home devices.
+doc_id: guide.repository-readme
 type: guide
 status: evolving
 rigor: operational
 owners: [repository-maintainers]
-verification: Run `python server.py --mock-self-test` and `pytest -m 'not real_system'`.
+verification: Run the virtual-environment tests, real transport probes, and exact artifact workflow described below.
 ---
 
 # Local Home Devices MCP
 
-This server exposes local OpenBK, Tasmota, Tuya, OpenHASP, MQTT, and Hikvision adapters through the Model Context Protocol. The public entrypoints are **stdio** and official FastMCP **Streamable HTTP** at `/mcp`.
-
-Legacy HTTP+SSE and the custom REST tool bridge are intentionally removed. They created separate execution paths that did not share authentication, authorization, rate limiting, target binding, or MCP lifecycle behavior.
+This branch is a **fail-closed compliance migration**, not an approved L2/L3 declaration. It exposes local-device operations through official MCP stdio and Streamable HTTP transports, with one application-owned authorization and target-binding pipeline.
 
 ## Safe defaults
 
-- HTTP binds to `127.0.0.1` unless configured otherwise.
-- A non-loopback bind requires `MCP_AUTH_TOKEN`; external identity-provider wiring is not yet implemented in this repository.
-- Write operations require `ENABLE_WRITE_OPERATIONS=1`.
-- Dangerous and privileged capabilities are inactive by default.
-- Direct IP targeting is disabled by default; use discovered exact device identities.
-- Network scans are private and bounded to `/24` or smaller unless the operator tightens or explicitly changes policy.
-- Caller-provided filesystem paths are not accepted for artifacts.
+- HTTP binds to `127.0.0.1` by default.
+- Writes and dangerous capabilities are disabled by default.
+- Target-bearing calls resolve an exact cached device, authorize its stable ID, serialize by that ID, and revalidate identity immediately before adapter invocation.
+- Legacy failures are raised as MCP tool errors rather than returned as successful JSON text.
+- Unmigrated writes, Docker-socket access, unrestricted paths, OTA, raw commands, and OpenHASP writes remain inactive.
+- `iot_set_power` is the first migrated real write slice and accepts explicit `ON` or `OFF`; `TOGGLE` is rejected.
 
-## Local verification
-
-Create an isolated environment and install the project:
+## Local development
 
 ```bash
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install -e '.[dev]'
-python server.py --mock-self-test
-pytest -m 'not real_system'
+MCP_MOCK_MODE=1 ENABLE_WRITE_OPERATIONS=1 python server.py --mock-self-test
+python -m pytest -m 'not real_system'
 ```
 
-The mock self-test performs no device, network, MQTT, Docker, or filesystem I/O outside its temporary artifact directory.
+The transport tests start an actual subprocess for stdio and an actual HTTP server for Streamable HTTP. `Client(mcp)` in-memory tests are not accepted as transport evidence.
 
-## Run
+## Running
 
-Stdio:
+Local subprocess integration:
 
 ```bash
 MCP_TRANSPORT=stdio local-home-devices-mcp
 ```
 
-Streamable HTTP on loopback:
+Loopback HTTP:
 
 ```bash
-MCP_TRANSPORT=http MCP_PORT=9102 local-home-devices-mcp
+MCP_TRANSPORT=http BIND_HOST=127.0.0.1 local-home-devices-mcp
 ```
 
-Authenticated LAN deployment:
+A non-loopback bind requires distinct authentication tokens and an explicitly configured TLS-terminating trusted proxy. Direct plaintext LAN deployment is rejected. See [Security model](docs/security-model.md).
 
-```bash
-MCP_TRANSPORT=http \
-BIND_HOST=0.0.0.0 \
-MCP_AUTH_TOKEN='<operator-generated-secret-at-least-32-characters>' \
-local-home-devices-mcp
-```
+## Capability status
 
-Container deployment uses an immutable image identity rather than `latest`:
+Capability discovery distinguishes supported and active operations. Disabled operations are not visible or invokable. The complete behavior contract is owned by [Capability contract](docs/capability-contract.md); migration status and remaining evidence are tracked in [Migration plan](docs/migration-plan.md).
 
-```bash
-export MCP_IMAGE='ghcr.io/paulomac1000/local-home-devices-mcp@sha256:<digest>'
-docker compose up -d
-```
+## Release integrity
 
-The Compose profile publishes only to host loopback, drops Linux capabilities,
-uses a read-only root filesystem, and does not mount the Docker socket.
-
-The static token verifier is suitable only for controlled local or LAN deployments. Internet-facing production deployment remains blocked until an explicit external FastMCP identity-provider adapter is implemented and tested.
-
-## Configuration
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `MCP_TRANSPORT` | `http` | `http` or `stdio` |
-| `MCP_PORT` | `9102` | Streamable HTTP port |
-| `MCP_PATH` | `/mcp` | MCP endpoint path |
-| `BIND_HOST` | `127.0.0.1` | Listener address |
-| `MCP_AUTH_TOKEN` | unset | Static bearer token, minimum 32 characters; controlled local/LAN use only |
-| `ENABLE_WRITE_OPERATIONS` | `0` | Operator write gate |
-| `ENABLE_DANGEROUS_OPERATIONS` | `0` | Additional dangerous-operation gate |
-| `MCP_ALLOWED_TARGET_NETWORKS` | RFC1918 ranges | Target allowlist |
-| `MCP_ALLOW_DIRECT_IP_TARGETS` | `0` | Allow IP selectors only for discovered stable identities |
-| `MCP_MIN_SCAN_PREFIX` | `24` | Broadest accepted scan prefix |
-| `MCP_ARTIFACT_ROOT` | `data/artifacts` | Confined artifact directory |
-| `MCP_MAX_ARTIFACT_BYTES` | `8388608` | Per-artifact limit |
-| `MCP_MOCK_MODE` | `0` | Register deterministic zero-I/O tools only |
-
-Backend-specific variables remain documented in `.env.example` and the adapter documentation.
-
-## Architecture and security
-
-- [System architecture](docs/system-architecture.md)
-- [Security model](docs/security-model.md)
-- [Capability contract](docs/capability-contract.md)
-- [Legacy transport migration](docs/migration-from-legacy-transports.md)
-- [Adoption status](docs/adoption-status.md)
-- [Migration plan](docs/migration-plan.md)
-- [Real-system verification TODOs](tests/real_system_todos.py)
-
-The repository does not claim a maturity level merely because files resemble a standard. Compliance is established by the adoption assessment, executable checks, and evidence tied to an immutable revision.
+CI builds one wheel, probes that installed wheel over real stdio, builds one image from that wheel, probes the image over real stdio and HTTP, publishes the tested image, and records `repository@sha256:digest`. Release promotion downloads that exact CI identity, verifies its GitHub attestation, and promotes the digest without resolving a mutable source tag or rebuilding.

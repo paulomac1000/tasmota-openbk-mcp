@@ -1,45 +1,52 @@
 ---
-description: Define authentication, authorization, target, data, and privileged-operation controls.
-doc_id: system.local-home-devices-security
-type: system
+description: Define authentication, target authorization, artifacts, and privileged-operation boundaries.
+doc_id: reference.security-model
+type: reference
 status: evolving
-rigor: normative
+rigor: operational
 owners: [repository-maintainers]
-verification: Run `pytest tests/unit/test_policy.py tests/unit/test_targeting.py tests/unit/test_artifacts.py`.
+verification: Run policy, target-binding, artifact, auth, and real-transport tests for the assessed revision.
 ---
 
 # Security model
 
-## Trust boundaries
+## Trust boundary
 
-HTTP clients are untrusted until FastMCP authentication succeeds. The current repository implements only a static bearer-token verifier for controlled local or LAN use; an internet-facing deployment is not supported until an external identity-provider adapter is implemented and tested. Stdio callers inherit the operating-system identity and permissions of the process launcher. Tool descriptions, model arguments, device responses, logs, filenames, URLs, and discovery records remain untrusted data.
+The MCP composition root owns authentication and the invocation gate. Adapter modules do not approve callers, choose fallback targets, or weaken operator policy.
 
-## Authorization
+## HTTP authentication
 
-Authorization is server-side. `requires_confirmation` is a consumer hint, not permission. Model arguments cannot enable writes, dangerous tools, direct IP targeting, privileged adapters, or retries.
+Loopback HTTP may serve anonymous read-only calls. A non-loopback bind is rejected unless authentication is configured and `MCP_TRUSTED_PROXY_TLS=1` confirms that a trusted reverse proxy terminates TLS. This flag does not create TLS; deployment owners must prove proxy and network configuration separately.
 
-Scopes are:
+Static tokens are separated by role:
 
-- `devices:read`
-- `devices:sensitive`
-- `devices:write`
-- `devices:dangerous`
-- `devices:admin` as an operator-controlled superset
+- read token: `devices:read`;
+- write token: read, sensitive read, and write;
+- admin token: `devices:admin`.
 
-Writes require both scope and `ENABLE_WRITE_OPERATIONS=1`. Dangerous operations additionally require `ENABLE_DANGEROUS_OPERATIONS=1` and remain inactive unless an operation-specific server-side approval mechanism exists.
+Dangerous access is not granted to every valid token. Static verification remains suitable only for controlled environments; production should replace it with reviewed JWT/JWKS or introspection.
 
-## Targets and SSRF
+## Target authorization
 
-Selectors are normalized without network I/O. Network-backed resolution follows authorization of the selector namespace. Literal targets must be IPv4 addresses in the operator allowlist. Discovery scans are private and bounded. Redirect, DNS, OTA, and webhook behavior must not permit a target to escape the authorized network or hostname allowlist.
+For target-bearing tools, runtime order is:
 
-## Files and artifacts
+1. parse the local selector;
+2. authorize the capability and selector form;
+3. resolve an exact cached record to `BoundTarget`;
+4. use `BoundTarget.target_id` as the concurrency key;
+5. re-read the registry and revalidate address plus fingerprint;
+6. invoke the adapter.
 
-Clients receive artifact IDs, not filesystem paths. The artifact store creates unpredictable names under one root, uses exclusive no-follow creation where available, applies mode `0600`, enforces size limits, and verifies containment on read.
+Partial name matching and silent fallback are prohibited. An adapter may receive the legacy selector for compatibility, but exact resolution is installed globally and the authorized binding remains in request context.
 
-## Privileged adapters
+## Blocking adapters and ambiguous outcomes
 
-Docker-socket capabilities are disabled. A future implementation must use a separate least-privileged sidecar with a fixed RPC contract and container allowlist. The main MCP process must not mount `/var/run/docker.sock`.
+Legacy synchronous adapters run through a bounded AnyIO worker pool. Cancellation abandons the wait but cannot stop an already-running system call. Therefore migrated mutations have backend timeouts, are not automatically retried, and require reconciliation before retry after a timeout. Unverified mutations stay inactive.
 
-## Sensitive data
+## Artifacts
 
-Tuya local keys, MQTT credentials, bearer tokens, camera snapshots, logs, MAC addresses, and alarm-server configuration receive explicit confidentiality classes. Responses and logs are minimized and sanitized. Credential files require restricted permissions and must not follow symlinks.
+Artifacts use opaque 128-bit identifiers, server-owned paths, exclusive no-follow creation where supported, `0600` files, per-item and total quotas, expiry, integrity hashes, and principal ownership. `artifact://<id>` reads require sensitive or admin scope and owner matching unless the caller is an administrator.
+
+## Privileged operations
+
+Docker socket access, caller-selected paths, firmware update, raw commands, factory reset, direct DPS mutation, and unbound OpenHASP writes remain disabled. Docker operations require a separately reviewed least-privileged sidecar before reactivation.

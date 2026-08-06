@@ -1,0 +1,44 @@
+from __future__ import annotations
+
+import pytest
+
+from tests.integration.conftest import RegistryMCP
+from tools.constants import TOOL_MANIFESTS
+from tools.iot_config import register_iot_config_tools
+from tools.iot_control import register_iot_control_tools
+from tools.iot_devices import register_iot_device_tools
+from tools.iot_discovery import register_iot_discovery_tools
+from tools.iot_hikvision import register_hikvision_tools
+from tools.iot_meta import register_iot_meta_tools
+from tools.iot_mqtt import register_iot_mqtt_tools
+from tools.iot_openhasp import register_openhasp_tools
+from tools.iot_tuya import register_iot_tuya_tools
+
+pytestmark = pytest.mark.unit
+
+
+def test_every_registered_tool_has_manifest_and_no_unexplained_orphans():
+    registry = RegistryMCP()
+    for register in (
+        register_iot_config_tools,
+        register_iot_control_tools,
+        register_iot_device_tools,
+        register_iot_discovery_tools,
+        register_hikvision_tools,
+        register_iot_meta_tools,
+        register_iot_mqtt_tools,
+        register_openhasp_tools,
+        register_iot_tuya_tools,
+    ):
+        register(registry)
+    registered = set(registry.tools)
+    manifests = set(TOOL_MANIFESTS)
+    assert registered <= manifests
+    assert manifests - registered == {
+        "hikvision_check_vmd",
+        "hikvision_container_logs",
+        "hikvision_container_status",
+        "hikvision_isapi_health",
+        "hikvision_pipeline_diagnose",
+        "hikvision_restart_container",
+    }

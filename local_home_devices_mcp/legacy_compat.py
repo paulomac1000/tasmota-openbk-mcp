@@ -1,104 +1,170 @@
-"""Narrow compatibility hardening for adapters pending full domain extraction."""
+"""Bounded compatibility adapters for legacy tools; no policy decisions live here."""
 
 from __future__ import annotations
 
-from contextvars import ContextVar
-import os
-from pathlib import Path
-from typing import Any
+import asyncio
+import functools
+import inspect
+import json
+from typing import Any, Callable
+
+import anyio
 
 from .config import Settings
-from .targeting import validate_address
+from .targeting import BoundTarget, TargetNotFound, resolve_exact_target, revalidate_binding
 
 
-class _ContextSlot:
-    """Expose the old `.value` protocol while using async-safe ContextVar state."""
+class LegacyToolFailure(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
 
-    def __init__(self) -> None:
-        self._value: ContextVar[str] = ContextVar("legacy_request_id", default="-")
 
-    @property
-    def value(self) -> str:
-        return self._value.get()
+def normalize_legacy_result(value: Any) -> Any:
+    """Convert legacy JSON envelopes to typed results or protocol-visible failures."""
+    if not isinstance(value, str):
+        return value
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    if not isinstance(payload, dict) or "success" not in payload:
+        return payload
+    if payload.get("success") is False:
+        error = payload.get("error") or {}
+        raise LegacyToolFailure(
+            str(error.get("code", "LEGACY_ERROR")),
+            str(error.get("message", "legacy tool failed")),
+        )
+    return payload.get("data", payload)
 
-    @value.setter
-    def value(self, value: str) -> None:
-        self._value.set(value)
+
+_thread_limiter = anyio.CapacityLimiter(8)
+
+
+def _wrap(function: Callable[..., Any]) -> Callable[..., Any]:
+    if inspect.iscoroutinefunction(function):
+
+        @functools.wraps(function)
+        async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
+            return normalize_legacy_result(await function(*args, **kwargs))
+
+        return async_wrapper
+
+    @functools.wraps(function)
+    async def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
+        call = functools.partial(function, *args, **kwargs)
+        value = await anyio.to_thread.run_sync(
+            call,
+            abandon_on_cancel=True,
+            limiter=_thread_limiter,
+        )
+        return normalize_legacy_result(value)
+
+    return sync_wrapper
+
+
+class LegacyRegistrationProxy:
+    """Wrap callables before FastMCP registration so schemas and errors stay correct."""
+
+    def __init__(self, mcp: Any) -> None:
+        self._mcp = mcp
+
+    def tool(self, *args: Any, **kwargs: Any) -> Any:
+        if args and callable(args[0]) and len(args) == 1 and not kwargs:
+            return self._mcp.tool(_wrap(args[0]))
+        decorator = self._mcp.tool(*args, **kwargs)
+        return lambda function: decorator(_wrap(function))
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._mcp, name)
+
+
+class LegacyTargetResolver:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    @staticmethod
+    def _devices() -> list[dict[str, Any]]:
+        from tools.iot_discovery import _get_cached_devices
+
+        return list(_get_cached_devices())
+
+    async def resolve(self, selector: str) -> BoundTarget:
+        devices = await asyncio.to_thread(self._devices)
+        return resolve_exact_target(selector, devices, self.settings)
+
+    async def revalidate(self, target: BoundTarget) -> None:
+        devices = await asyncio.to_thread(self._devices)
+        matches = [record for record in devices if str(record.get("ip", "")) == target.address]
+        if len(matches) != 1:
+            raise TargetNotFound("authorized target disappeared or became ambiguous")
+        revalidate_binding(target, matches[0], self.settings)
 
 
 def install_legacy_safety(settings: Settings) -> None:
-    """Install fail-closed compatibility hooks before adapter registration."""
+    """Make legacy lookup exact and patch known unsafe Tuya dispatch behavior."""
+    from tools import iot_control, iot_discovery
+    from tools.constants import _error_response_extended
 
-    # Credentials and caches created by legacy adapters inherit owner-only permissions.
-    os.umask(0o077)
+    original_resolve = iot_discovery._resolve_ip
 
-    from tools import constants
-
-    constants._request_id_context = _ContextSlot()  # type: ignore[attr-defined]
-
-    # Reject credential-cache symlinks and restrict existing cache permissions.
-    cache_path = Path(constants.TUYA_DEVICES_FILE)
-    if cache_path.is_symlink():
-        raise RuntimeError("TUYA_DEVICES_FILE must not be a symbolic link")
-    if cache_path.exists():
-        os.chmod(cache_path, 0o600)
-
-    # Replace partial-name first-match resolution with exact-only resolution.
-    from tools import iot_discovery
-
-    def exact_find(identifier: str) -> dict[str, Any] | None:
-        devices = iot_discovery._get_cached_devices()
-        value = identifier.strip().casefold()
-        exact = [
-            device
-            for device in devices
-            if value
-            in {
-                str(device.get("ip", "")).strip().casefold(),
-                str(device.get("name", "")).strip().casefold(),
-                str(device.get("target_id", "")).strip().casefold(),
-            }
-        ]
-        if len(exact) > 1:
-            raise ValueError(f"AMBIGUOUS_TARGET: {identifier!r} matched {len(exact)} devices")
-        if not exact:
+    def exact_resolve(selector: str) -> str | None:
+        try:
+            target = resolve_exact_target(
+                selector, iot_discovery._get_cached_devices(), settings
+            )
+            return target.address
+        except Exception:
             return None
-        validate_address(str(exact[0].get("ip", "")), settings)
-        return exact[0]
 
-    iot_discovery._find_device_by_identifier = exact_find
+    if not getattr(original_resolve, "__exact_target_wrapper__", False):
+        setattr(exact_resolve, "__exact_target_wrapper__", True)
+        iot_discovery._resolve_ip = exact_resolve
 
-    # Tuya identifiers are also exact-only; never select the first partial match.
-    try:
-        from tools import iot_tuya
-    except ImportError:
-        iot_tuya = None
+    original_power = iot_control._set_power
+    original_brightness = iot_control._set_brightness
+    if getattr(original_power, "__tuya_safety_wrapper__", False):
+        return
 
-    if iot_tuya is not None:
+    def safe_set_power(
+        identifier: str, state: str, channel: int = 1, timeout_seconds: int = 10
+    ) -> str:
+        resolved = iot_discovery._resolve_ip(identifier)
+        device_type = (
+            iot_discovery._detect_device_type(resolved, timeout_seconds) if resolved else None
+        )
+        if device_type == "tuya" and state.upper() == "TOGGLE":
+            return _error_response_extended(
+                code="UNSUPPORTED_OPERATION",
+                message=(
+                    "Tuya TOGGLE is disabled because it is non-idempotent; "
+                    "use explicit ON or OFF."
+                ),
+            )
+        return original_power(identifier, state, channel, timeout_seconds)
 
-        def exact_tuya(identifier: str) -> dict[str, Any] | None:
-            cache = iot_tuya._load_tuya_devices()
-            devices = cache.get("devices", {})
-            value = identifier.strip().casefold()
-            matches: list[dict[str, Any]] = []
-            for device_id, entry in devices.items():
-                candidates = {
-                    str(device_id).strip().casefold(),
-                    str(entry.get("device_id", "")).strip().casefold(),
-                    str(entry.get("ip", "")).strip().casefold(),
-                    str(entry.get("name", "")).strip().casefold(),
-                }
-                if value in candidates:
-                    matches.append(entry)
-            if len(matches) > 1:
-                raise ValueError(
-                    f"AMBIGUOUS_TARGET: {identifier!r} matched {len(matches)} devices"
-                )
-            if not matches:
-                return None
-            address = str(matches[0].get("ip", "")).strip()
-            if address:
-                validate_address(address, settings)
-            return matches[0]
+    def safe_set_brightness(
+        identifier: str, brightness: int, channel: int = 1, timeout_seconds: int = 10
+    ) -> str:
+        resolved = iot_discovery._resolve_ip(identifier)
+        device_type = (
+            iot_discovery._detect_device_type(resolved, timeout_seconds) if resolved else None
+        )
+        if device_type != "tuya":
+            return original_brightness(identifier, brightness, channel, timeout_seconds)
+        from tools.iot_tuya import _find_tuya_in_cache, _tuya_set_value
 
-        iot_tuya._find_tuya_in_cache = exact_tuya
+        entry = _find_tuya_in_cache(identifier) or {}
+        brightness_dp = entry.get("brightness_dp_id")
+        if not brightness_dp:
+            return _error_response_extended(
+                code="UNSUPPORTED_OPERATION",
+                message="Tuya brightness requires a reviewed brightness_dp_id mapping.",
+            )
+        return _tuya_set_value(identifier, str(brightness_dp), brightness)
+
+    setattr(safe_set_power, "__tuya_safety_wrapper__", True)
+    setattr(safe_set_brightness, "__tuya_safety_wrapper__", True)
+    iot_control._set_power = safe_set_power
+    iot_control._set_brightness = safe_set_brightness
