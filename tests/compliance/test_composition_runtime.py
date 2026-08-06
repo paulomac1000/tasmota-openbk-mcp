@@ -160,10 +160,17 @@ def test_auth_and_principal_roles(
     assert _principal_from_fastmcp(http).subject == "anonymous-loopback-http"
 
     fake_fastmcp["value"] = SimpleNamespace(
-        client_id="reader", scopes=["devices:read"], claims={"sub": "ignored"}
+        client_id="reader",
+        scopes=["devices:read"],
+        claims={"sub": "ignored", "targets": ["dev_mock_light"]},
     )
     principal = _principal_from_fastmcp(http)
-    assert principal == Principal("reader", frozenset({"devices:read"}), "http")
+    assert principal == Principal(
+        "reader",
+        frozenset({"devices:read"}),
+        "http",
+        target_ids=frozenset({"dev_mock_light"}),
+    )
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,7 @@ class Principal:
     subject: str
     scopes: frozenset[str]
     transport: str
+    target_ids: frozenset[str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -198,6 +199,13 @@ class OperationGate:
             raise PolicyError("target resolver is unavailable for a target-bearing capability")
         return await self.target_resolver.resolve(selector)
 
+    @staticmethod
+    def authorize_target(target: BoundTarget | None, principal: Principal) -> None:
+        if target is None or "devices:admin" in principal.scopes:
+            return
+        if principal.target_ids is not None and target.target_id not in principal.target_ids:
+            raise PolicyError(f"principal is not authorized for target: {target.target_id}")
+
     @asynccontextmanager
     async def guard_async(
         self, tool_name: str, arguments: Mapping[str, Any], principal: Principal
@@ -206,6 +214,7 @@ class OperationGate:
         await self.rate_limiter.check(principal.subject)
         self.authorize(tool_name, arguments, principal)
         target = await self._resolve_target(arguments)
+        self.authorize_target(target, principal)
         timeout = manifest["timeout_ms"] / 1000
         context = InvocationContext(
             principal=principal,

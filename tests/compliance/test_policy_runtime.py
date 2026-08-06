@@ -112,3 +112,24 @@ async def test_literal_ip_in_identifier_is_rejected_when_disabled(tmp_path: Path
             {"identifier": "192.0.2.10"},
             principal,
         )
+
+
+@pytest.mark.asyncio
+async def test_principal_target_acl_is_checked_after_resolution(tmp_path: Path):
+    resolver = MockTargetResolver()
+    gate = OperationGate(settings(tmp_path), MOCK_MANIFESTS, target_resolver=resolver)
+    principal = Principal(
+        "restricted",
+        frozenset({"devices:read"}),
+        "http",
+        target_ids=frozenset({"dev_other"}),
+    )
+
+    with pytest.raises(PermissionError, match="not authorized for target"):
+        await gate.invoke_async(
+            "mock_get_state",
+            lambda identifier: {"identifier": identifier},
+            {"identifier": "dev_mock_light"},
+            principal,
+        )
+    assert resolver.revalidations == 0
