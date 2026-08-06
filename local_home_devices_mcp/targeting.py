@@ -43,13 +43,28 @@ class TargetResolver(Protocol):
     async def revalidate(self, target: BoundTarget) -> None: ...
 
 
+def _normalized_identity_parts(device: Mapping[str, Any]) -> list[str]:
+    parts: list[str] = []
+    for key in ("device_id", "serial", "mac", "target_id"):
+        value = str(device.get(key, "")).strip()
+        if not value:
+            continue
+        if key == "mac":
+            compact = re.sub(r"[^0-9A-Fa-f]", "", value).lower()
+            if len(compact) != 12:
+                raise TargetError("device MAC address is not a stable 48-bit identifier")
+            value = compact
+        else:
+            value = value.casefold()
+        parts.append(f"{key}:{value}")
+    return parts
+
+
 def _fingerprint(device: Mapping[str, Any]) -> str:
-    identity = "|".join(
-        str(device.get(key, "")) for key in ("device_id", "mac", "serial", "type", "name")
-    )
-    if not identity.strip("|"):
+    parts = _normalized_identity_parts(device)
+    if not parts:
         raise TargetError("device has no stable identity attributes")
-    return hashlib.sha256(identity.encode()).hexdigest()
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
 def target_id_for(device: Mapping[str, Any]) -> str:

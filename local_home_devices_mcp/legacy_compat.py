@@ -11,7 +11,13 @@ from typing import Any, Callable
 import anyio
 
 from .config import Settings
-from .targeting import BoundTarget, TargetNotFound, resolve_exact_target, revalidate_binding
+from .targeting import (
+    BoundTarget,
+    TargetNotFound,
+    normalize_selector,
+    resolve_exact_target,
+    revalidate_binding,
+)
 
 
 class LegacyToolFailure(RuntimeError):
@@ -40,6 +46,29 @@ def normalize_legacy_result(value: Any) -> Any:
 
 
 _thread_limiter = anyio.CapacityLimiter(8)
+_TARGET_ARGUMENTS = ("target_id", "identifier", "ip_address", "ip")
+
+
+def _bind_authorized_target(
+    function: Callable[..., Any], args: tuple[Any, ...], kwargs: dict[str, Any]
+) -> tuple[tuple[Any, ...], dict[str, Any]]:
+    """Replace a model selector with the address authorized by the invocation gate.
+
+    This is the migration boundary that prevents legacy tools from re-resolving a
+    mutable name after authorization and identity revalidation.
+    """
+    from .policy import current_context
+
+    context = current_context()
+    if context is None or context.target is None:
+        return args, kwargs
+    signature = inspect.signature(function)
+    bound = signature.bind_partial(*args, **kwargs)
+    for name in _TARGET_ARGUMENTS:
+        if name in bound.arguments:
+            bound.arguments[name] = context.target.address
+            return bound.args, bound.kwargs
+    return args, kwargs
 
 
 def _wrap(function: Callable[..., Any]) -> Callable[..., Any]:
@@ -47,18 +76,29 @@ def _wrap(function: Callable[..., Any]) -> Callable[..., Any]:
 
         @functools.wraps(function)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            return normalize_legacy_result(await function(*args, **kwargs))
+            bound_args, bound_kwargs = _bind_authorized_target(function, args, kwargs)
+            return normalize_legacy_result(await function(*bound_args, **bound_kwargs))
 
         return async_wrapper
 
     @functools.wraps(function)
     async def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
-        call = functools.partial(function, *args, **kwargs)
-        value = await anyio.to_thread.run_sync(
-            call,
-            abandon_on_cancel=True,
-            limiter=_thread_limiter,
+        bound_args, bound_kwargs = _bind_authorized_target(function, args, kwargs)
+        call = functools.partial(function, *bound_args, **bound_kwargs)
+        worker = asyncio.create_task(
+            anyio.to_thread.run_sync(
+                call,
+                abandon_on_cancel=False,
+                limiter=_thread_limiter,
+            )
         )
+        try:
+            value = await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            # A timed-out client must not release the target lock while a legacy
+            # mutation is still executing in its worker thread.
+            await asyncio.shield(worker)
+            raise
         return normalize_legacy_result(value)
 
     return sync_wrapper
@@ -110,6 +150,23 @@ def install_legacy_safety(settings: Settings) -> None:
     original_resolve = iot_discovery._resolve_ip
 
     def exact_resolve(selector: str) -> str | None:
+        from .policy import current_context
+
+        context = current_context()
+        if context is not None and context.target is not None:
+            target = context.target
+            try:
+                normalized = normalize_selector(selector)
+                authorized_selectors = {
+                    normalize_selector(target.address),
+                    normalize_selector(target.target_id),
+                    normalize_selector(target.display_name),
+                }
+            except Exception:
+                return None
+            if normalized in authorized_selectors:
+                return target.address
+            return None
         try:
             target = resolve_exact_target(
                 selector, iot_discovery._get_cached_devices(), settings

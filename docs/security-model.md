@@ -35,17 +35,18 @@ For target-bearing tools, runtime order is:
 3. resolve an exact cached record to `BoundTarget`;
 4. use `BoundTarget.target_id` as the concurrency key;
 5. re-read the registry and revalidate address plus fingerprint;
-6. invoke the adapter.
+6. replace the model-supplied selector at the compatibility boundary with the authorized `BoundTarget.address`;
+7. invoke the adapter without a second registry lookup.
 
-Partial name matching and silent fallback are prohibited. An adapter may receive the legacy selector for compatibility, but exact resolution is installed globally and the authorized binding remains in request context.
+Partial name matching and silent fallback are prohibited. Legacy adapters receive only the canonical authorized address. The compatibility resolver recognizes that address from invocation context and never switches to a newly matching cache record after revalidation.
 
 ## Blocking adapters and ambiguous outcomes
 
-Legacy synchronous adapters run through a bounded AnyIO worker pool. Cancellation abandons the wait but cannot stop an already-running system call. Therefore migrated mutations have backend timeouts, are not automatically retried, and require reconciliation before retry after a timeout. Unverified mutations stay inactive.
+Legacy synchronous adapters run through a bounded AnyIO worker pool. A client deadline cannot stop an already-running system call, so cancellation is shielded until the worker exits and the target lock remains owned for the entire physical operation. The client then receives an ambiguous-outcome timeout. Such mutations are not automatically retried and require reconciliation before a later attempt. Unverified mutations stay inactive.
 
 ## Artifacts
 
-Artifacts use opaque 128-bit identifiers, server-owned paths, exclusive no-follow creation where supported, `0600` files, per-item and total quotas, expiry, integrity hashes, and principal ownership. `artifact://<id>` reads require sensitive or admin scope and owner matching unless the caller is an administrator.
+Artifacts use opaque 128-bit identifiers, server-owned paths, exclusive no-follow creation where supported, `0600` files, per-item and total quotas, expiry, integrity hashes, and principal ownership. The `artifact://<id>` resource is registered in mock and production compositions and requires sensitive or admin scope plus owner matching unless the caller is an administrator. Production device adapters are not yet all wired as artifact writers and must be migrated separately.
 
 ## Privileged operations
 

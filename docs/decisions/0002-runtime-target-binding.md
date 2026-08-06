@@ -16,4 +16,4 @@ Target-bearing calls resolve an exact selector to `BoundTarget` before lock acqu
 
 ## Consequences
 
-Two aliases for the same device serialize on one async lock. Direct adapter re-resolution remains only as a bounded compatibility behavior and is forced exact. Future adapters must accept `BoundTarget` directly before they can remove the compatibility layer.
+Two aliases for the same device serialize on one async lock. The compatibility wrapper replaces any legacy selector argument with the authorized address, and the compatibility resolver accepts only the target stored in request context. Cache changes after revalidation therefore cannot redirect I/O. Future adapters should accept `BoundTarget` directly and remove this wrapper.

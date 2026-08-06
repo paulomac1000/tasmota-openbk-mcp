@@ -89,12 +89,17 @@ def test_exact_resolution_and_failure_modes(tmp_path: Path):
 def test_fingerprint_target_id_and_revalidation(tmp_path: Path):
     config = settings(tmp_path)
     generated = device(target_id="")
-    assert target_id_for(generated).startswith("dev_")
+    generated_id = target_id_for(generated)
+    assert generated_id.startswith("dev_")
+    assert target_id_for(
+        device(target_id="", name="Renamed Light", type="openbk")
+    ) == generated_id
     with pytest.raises(TargetError, match="stable identity"):
-        target_id_for({"ip": "192.0.2.10"})
+        target_id_for({"ip": "192.0.2.10", "name": "Name Only"})
 
     bound = resolve_exact_target("dev_light", [device()], config)
     revalidate_binding(bound, device(), config)
+    revalidate_binding(bound, device(name="Renamed Light", type="openbk"), config)
     with pytest.raises(TargetNotAuthorized, match="address changed"):
         revalidate_binding(bound, device(ip="192.0.2.11"), config)
     with pytest.raises(TargetNotAuthorized, match="identity changed"):

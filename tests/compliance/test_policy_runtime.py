@@ -133,3 +133,59 @@ async def test_principal_target_acl_is_checked_after_resolution(tmp_path: Path):
             principal,
         )
     assert resolver.revalidations == 0
+
+
+@pytest.mark.asyncio
+async def test_timeout_keeps_target_lock_until_sync_worker_finishes(tmp_path: Path):
+    import threading
+    import time
+
+    from local_home_devices_mcp.legacy_compat import _wrap
+
+    resolver = MockTargetResolver()
+    gate = OperationGate(settings(tmp_path), MOCK_MANIFESTS, target_resolver=resolver)
+    principal = Principal("test", frozenset({"devices:admin"}), "stdio")
+    active = 0
+    max_active = 0
+    second_started = threading.Event()
+
+    def operation(identifier: str, power: bool) -> dict[str, object]:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        try:
+            if power:
+                time.sleep(0.12)
+            else:
+                second_started.set()
+            return {"identifier": identifier, "power": power}
+        finally:
+            active -= 1
+
+    async def first_call() -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.02):
+                await gate.invoke_async(
+                    "mock_set_power",
+                    _wrap(operation),
+                    {"identifier": "Mock Light", "power": True},
+                    principal,
+                )
+
+    first = asyncio.create_task(first_call())
+    await asyncio.sleep(0.04)
+    second = asyncio.create_task(
+        gate.invoke_async(
+            "mock_set_power",
+            _wrap(operation),
+            {"identifier": "dev_mock_light", "power": False},
+            principal,
+        )
+    )
+    await asyncio.sleep(0.04)
+    assert not second_started.is_set()
+    await asyncio.gather(first, second)
+
+    assert second_started.is_set()
+    assert max_active == 1
+    assert gate.locks.entry_count == 0

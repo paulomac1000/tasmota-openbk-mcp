@@ -7,7 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 RUN groupadd --system mcp && useradd --system --gid mcp --home /app mcp
 WORKDIR /app
 COPY dist/*.whl /tmp/package.whl
-RUN python -m pip install --no-cache-dir /tmp/package.whl && rm /tmp/package.whl
+COPY requirements.lock /tmp/requirements.lock
+COPY wheelhouse/ /tmp/wheelhouse/
+RUN python -m pip install --no-cache-dir \
+      --no-index --find-links=/tmp/wheelhouse --require-hashes \
+      -r /tmp/requirements.lock \
+    && python -m pip install --no-cache-dir --no-index --no-deps /tmp/package.whl \
+    && rm -rf /tmp/package.whl /tmp/requirements.lock /tmp/wheelhouse
 RUN mkdir -p /app/data/artifacts && chown -R mcp:mcp /app
 USER mcp
 

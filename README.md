@@ -19,7 +19,7 @@ This branch is a **fail-closed compliance migration**, not an approved L2/L3 dec
 - Target-bearing calls resolve an exact cached device, authorize its stable ID, serialize by that ID, and revalidate identity immediately before adapter invocation.
 - Legacy failures are raised as MCP tool errors rather than returned as successful JSON text.
 - Unmigrated writes, Docker-socket access, unrestricted paths, OTA, raw commands, and OpenHASP writes remain inactive.
-- `iot_set_power` is the first migrated real write slice and accepts explicit `ON` or `OFF`; `TOGGLE` is rejected.
+- Multi-backend `iot_set_power` remains inactive until every backend has its own contract, timeout, read-back, overlap, and real-device evidence; `TOGGLE` remains rejected at the policy boundary.
 
 ## Local development
 
@@ -55,4 +55,4 @@ Capability discovery distinguishes supported and active operations. Disabled ope
 
 ## Release integrity
 
-CI builds one wheel, probes that installed wheel over real stdio, builds one image from that wheel, probes the image over real stdio and HTTP, publishes the tested image, and records `repository@sha256:digest`. Release promotion downloads that exact CI identity, verifies its GitHub attestation, and promotes the digest without resolving a mutable source tag or rebuilding.
+CI builds one wheel, resolves runtime dependencies into a SHA-256-locked wheelhouse, probes the offline-installed wheel over real stdio, builds one image without package-index access, probes the image over real stdio and HTTP, publishes the tested image, and records `repository@sha256:digest`. Release promotion checks that the release version matches `pyproject.toml`, requires the `release` environment, verifies the exact CI identity and attestation, and promotes the digest without rebuilding.

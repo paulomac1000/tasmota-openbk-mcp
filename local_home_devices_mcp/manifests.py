@@ -71,7 +71,9 @@ def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     if name in dangerous_names:
         risk = "DANGEROUS"
 
-    migrated_mutations = {"iot_set_power"}
+    # Legacy multi-backend writes remain disabled until every backend has
+    # backend-specific evidence and ambiguous-outcome reconciliation.
+    migrated_mutations: set[str] = set()
     legacy_mutation = (
         mutating and not name.startswith("mock_") and name not in migrated_mutations
     )
@@ -103,7 +105,7 @@ def normalize_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
         confidentiality = "public"
 
     mock = name.startswith("mock_")
-    verified_explicit_set = name == "iot_set_power"
+    verified_explicit_set = False
     retry_conditions = (
         manifest.get("retry_conditions", deepcopy(_DEFAULT_RETRY_CONDITIONS))
         if mock

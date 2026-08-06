@@ -172,6 +172,12 @@ def _register_mock_tools(
             "expires_at": metadata.expires_at,
         }
 
+
+def _register_artifact_resource(
+    mcp: Any, artifact_store: ArtifactStore, settings: Settings
+) -> None:
+    """Expose artifact reads in every runtime; writers can be migrated independently."""
+
     @mcp.resource("artifact://{artifact_id}", mime_type="application/octet-stream")
     def read_artifact(artifact_id: str) -> bytes:
         """Read one integrity-checked artifact by opaque ID."""
@@ -223,6 +229,7 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
 
         install_legacy_safety(settings)
         _register_legacy_tools(mcp)
+    _register_artifact_resource(mcp, artifact_store, settings)
 
     for name, manifest in catalog.items():
         if manifest["active_state"] != "active":
@@ -245,15 +252,26 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
     async def ready(_request: Any) -> JSONResponse:
         registered = set(await mcp.get_tools())
         governed = set(catalog)
-        missing = sorted(registered - governed)
-        status = "ready" if not missing else "not-ready"
+        active = {
+            name
+            for name, manifest in catalog.items()
+            if manifest["active_state"] == "active"
+        }
+        unexpected_registered = sorted(registered - governed)
+        missing_active = sorted(active - registered)
+        status = (
+            "ready"
+            if not unexpected_registered and not missing_active
+            else "not-ready"
+        )
         return JSONResponse(
             {
                 "status": status,
                 "registered": len(registered),
                 "governed": len(governed),
-                "missing_manifests": missing,
-                "inactive_or_optional": sorted(governed - registered),
+                "unexpected_registered": unexpected_registered,
+                "missing_active": missing_active,
+                "inactive_or_optional": sorted((governed - active) - registered),
             },
             status_code=200 if status == "ready" else 503,
         )

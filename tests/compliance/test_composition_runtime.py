@@ -278,3 +278,51 @@ def test_capability_document_is_zero_io(tmp_path: Path) -> None:
         "mock_set_power",
         "mock_capture_snapshot",
     }
+
+
+@pytest.mark.asyncio
+async def test_readiness_rejects_missing_active_and_unexpected_tools(
+    tmp_path: Path, fake_fastmcp: dict[str, Any]
+) -> None:
+    import json
+
+    from local_home_devices_mcp.composition import build_server
+
+    build_server(settings(tmp_path))
+    mcp = FakeFastMCP.last
+    assert mcp is not None
+
+    missing = mcp.tools.pop("mock_get_state")
+    response = await mcp.routes["/ready"](None)
+    payload = json.loads(response.body)
+    assert response.status_code == 503
+    assert payload["missing_active"] == ["mock_get_state"]
+    assert payload["unexpected_registered"] == []
+
+    mcp.tools["mock_get_state"] = missing
+    mcp.tools["unclassified_tool"] = lambda: None
+    response = await mcp.routes["/ready"](None)
+    payload = json.loads(response.body)
+    assert response.status_code == 503
+    assert payload["missing_active"] == []
+    assert payload["unexpected_registered"] == ["unclassified_tool"]
+
+
+def test_artifact_resource_is_registered_outside_mock_mode(
+    tmp_path: Path, fake_fastmcp: dict[str, Any]
+) -> None:
+    from local_home_devices_mcp.composition import build_server
+    from tools import iot_control, iot_discovery
+
+    original_power = iot_control._set_power
+    original_brightness = iot_control._set_brightness
+    original_resolve = iot_discovery._resolve_ip
+    try:
+        build_server(settings(tmp_path, mock_mode=False))
+        mcp = FakeFastMCP.last
+        assert mcp is not None
+        assert "artifact://{artifact_id}" in mcp.resources
+    finally:
+        iot_control._set_power = original_power
+        iot_control._set_brightness = original_brightness
+        iot_discovery._resolve_ip = original_resolve
