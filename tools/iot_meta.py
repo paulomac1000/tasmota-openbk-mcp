@@ -35,7 +35,7 @@ def _describe_capabilities() -> str:
             "server_version": "2.0.0",
             "legacy_tool_version": TOOLS_VERSION,
             "sdk_family": "fastmcp",
-            "sdk_version": "3.4.4",
+            "sdk_version": "3.4.6",
             "supported_transports": ["stdio", "streamable-http"],
             "active_transport": settings.transport,
             "supported_count": len(catalog),
