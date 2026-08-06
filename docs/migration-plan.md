@@ -29,7 +29,7 @@ physical-device behavior is verified without real-system evidence.
 - Disable raw commands, OTA, factory reset, Docker-socket access, unbound OpenHASP hosts,
   direct Tuya DPS mutation, and other legacy writes until operation-specific evidence exists.
 - Treat discovery as a write while it persists a cache.
-- Use FastMCP 3.4.4 instead of the FastMCP 2 line named by the assessed standards revision.
+- Use FastMCP 3.4.6 instead of the FastMCP 2 line named by the assessed standards revision.
 
 ## Evidence
 
