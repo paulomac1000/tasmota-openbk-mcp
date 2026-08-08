@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "local-home-devices-mcp"
 version = "2.0.0"
 description = "Policy-governed MCP server for local home devices"
-requires-python = ">=3.12"
+requires-python = ">=3.13,<3.14"
 dependencies = [
   "anyio==4.14.2",
   "defusedxml==0.7.1",
@@ -63,12 +63,12 @@ show_missing = true
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py313"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.mypy]
-python_version = "3.12"
+python_version = "3.13"
 strict = true
 packages = ["local_home_devices_mcp"]
