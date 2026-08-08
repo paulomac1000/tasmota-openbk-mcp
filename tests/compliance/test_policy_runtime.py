@@ -72,12 +72,16 @@ async def test_aliases_for_same_target_share_one_lock(tmp_path: Path):
 
     await asyncio.gather(
         gate.invoke_async(
-            "mock_set_power", operation,
-            {"identifier": "Mock Light", "power": True}, principal,
+            "mock_set_power",
+            operation,
+            {"identifier": "Mock Light", "power": True},
+            principal,
         ),
         gate.invoke_async(
-            "mock_set_power", operation,
-            {"identifier": "dev_mock_light", "power": False}, principal,
+            "mock_set_power",
+            operation,
+            {"identifier": "dev_mock_light", "power": False},
+            principal,
         ),
     )
 
@@ -115,7 +119,7 @@ async def test_literal_ip_in_identifier_is_rejected_when_disabled(tmp_path: Path
 
 
 @pytest.mark.asyncio
-async def test_principal_target_acl_is_checked_after_resolution(tmp_path: Path):
+async def test_stable_target_acl_is_checked_before_resolution(tmp_path: Path):
     resolver = MockTargetResolver()
     gate = OperationGate(settings(tmp_path), MOCK_MANIFESTS, target_resolver=resolver)
     principal = Principal(
@@ -125,14 +129,77 @@ async def test_principal_target_acl_is_checked_after_resolution(tmp_path: Path):
         target_ids=frozenset({"dev_other"}),
     )
 
-    with pytest.raises(PermissionError, match="not authorized for target"):
+    with pytest.raises(PermissionError, match="not authorized for target selector"):
         await gate.invoke_async(
             "mock_get_state",
             lambda identifier: {"identifier": identifier},
             {"identifier": "dev_mock_light"},
             principal,
         )
+    assert resolver.resolve_calls == 0
     assert resolver.revalidations == 0
+
+
+@pytest.mark.asyncio
+async def test_alias_resolution_is_confined_to_authorized_namespace(tmp_path: Path):
+    resolver = MockTargetResolver()
+    gate = OperationGate(settings(tmp_path), MOCK_MANIFESTS, target_resolver=resolver)
+    principal = Principal(
+        "restricted",
+        frozenset({"devices:read"}),
+        "http",
+        target_ids=frozenset({"dev_other"}),
+    )
+
+    with pytest.raises(ValueError, match="authorized namespace"):
+        await gate.invoke_async(
+            "mock_get_state",
+            lambda identifier: {"identifier": identifier},
+            {"identifier": "Mock Light"},
+            principal,
+        )
+    assert resolver.resolve_calls == 1
+    assert resolver.revalidations == 0
+
+
+@pytest.mark.asyncio
+async def test_one_deadline_covers_resolution_and_backend(tmp_path: Path):
+    class SlowResolver(MockTargetResolver):
+        async def resolve(
+            self,
+            selector: str,
+            *,
+            allowed_target_ids: frozenset[str] | None = None,
+        ):
+            await asyncio.sleep(0.07)
+            return await super().resolve(
+                selector,
+                allowed_target_ids=allowed_target_ids,
+            )
+
+    manifests = {name: dict(value) for name, value in MOCK_MANIFESTS.items()}
+    manifests["mock_get_state"] = {
+        **manifests["mock_get_state"],
+        "timeout_ms": 100,
+    }
+    gate = OperationGate(
+        settings(tmp_path),
+        manifests,
+        target_resolver=SlowResolver(),
+    )
+    principal = Principal("reader", frozenset({"devices:read"}), "http")
+
+    async def backend(identifier: str) -> str:
+        await asyncio.sleep(0.07)
+        return identifier
+
+    with pytest.raises(TimeoutError):
+        await gate.invoke_async(
+            "mock_get_state",
+            backend,
+            {"identifier": "dev_mock_light"},
+            principal,
+        )
 
 
 @pytest.mark.asyncio
