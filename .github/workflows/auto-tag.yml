@@ -13,16 +13,14 @@ permissions:
 
 jobs:
   validate:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - name: Validate version only
         env:
           VERSION: ${{ inputs.version }}
         run: '[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]'
-
       - name: Explain protected release flow
         run: |
-          echo "Tags are not created automatically before CI."
-          echo "Create an annotated tag only after the main-branch sha image exists."
-          echo "The promotion workflow reuses that exact registry digest."
+          echo "This workflow does not create tags or publish packages."
+          echo "Use the protected release workflow only after trusted CI succeeds."
