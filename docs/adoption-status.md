@@ -5,26 +5,35 @@ type: reference
 status: evolving
 rigor: operational
 owners: [repository-maintainers]
-verification: Run the CI workflow and create a provider-backed assessment only after immutable evidence and independent review exist.
+verification: Run the exact-revision CI workflow and create provider-backed assessment evidence only after independent review exists.
 ---
 
 # AI skills adoption status
 
 ## Answer
 
-The candidate implements the architectural controls from `ai-skills` revision
-`661ff01a5e70d58d6c94a12545b24647e52063ed`, but it does not claim an approved maturity
-level before provider-backed CI evidence and independent review are bound to an immutable
-revision.
+This branch is a candidate adoption of `mcp-server-architect` version `1.2.0` from
+`ai-skills` revision `c6dc6b13b2dd40b6e087140cd071b45067d75b39`. It does not claim an
+approved maturity level before provider-backed CI evidence and independent review are bound to
+an immutable project revision.
+
+The project uses the independently distributed `fastmcp==3.4.6` package. The pinned `ai-skills`
+FastMCP profile has no verified baseline versions or repository-tested protocol revisions for
+that SDK family. Therefore `3.4.6` is a repo-local candidate lane backed by this repository's own
+tests; it is not presented as an `ai-skills`-verified FastMCP baseline.
 
 ## Implemented controls
 
-- One FastMCP composition root and one invocation policy path.
+- One FastMCP composition root and application-owned invocation kernel for public components.
+- Capability and selector-namespace authorization before target resolution, followed by exact
+  stable-target authorization and identity revalidation.
 - Official stdio and Streamable HTTP transports only.
-- Complete, conservative application-owned capability manifests.
-- Exact target matching, network allowlists, and identity revalidation primitives.
+- Complete, conservative application-owned capability manifests that reject unknown or
+  unclassified legacy capabilities instead of defaulting them to read access.
+- One absolute request deadline propagated through resolution, concurrency admission,
+  revalidation, and backend execution.
 - Server-side scopes and operator gates independent from model arguments.
-- Confined artifact IDs instead of caller-controlled paths.
+- Principal-bound opaque artifact IDs and governed artifact-resource access.
 - Exact wheel-to-image promotion and digest-based release promotion.
 - AFDS-governed architecture, security, capability, migration, and operations documents.
 
@@ -37,19 +46,18 @@ Run:
 .venv/bin/python -m pytest -m 'not real_system'
 ```
 
-The local isolated environment verifies all zero-I/O tests. Official FastMCP client tests,
-package installation, container smoke, AFDS validation, and AGENTS validation are executed by
-hosted CI because the local environment has no package-network or container runtime access.
+The local isolated environment is used for every zero-I/O test available in the workspace.
+Hosted CI remains authoritative for the pinned Ruff, mypy, Bandit, FastMCP client, exact-wheel,
+and container lanes that are unavailable in the restricted local package/network environment.
 
 ## Pending evidence
 
-A schema-valid `adoption-assessment.yaml` is intentionally not committed yet. The current
-`ai-skills` schema requires GitHub Actions run, job, check, artifact, report, reviewer, and digest
-identities even when the result is `not-run` or the decision is `request-changes`. Inventing those
-values would be false evidence. A trusted verifier must generate the assessment after CI and an
-independent review exist.
-The public pull request remains a draft until those hosted checks and review are complete.
+A schema-valid `migration-assessment.yaml` is not treated as complete until its exact project
+revision, exact `ai-skills` revision, skill version, maturity/profile selection, provider-backed
+workflow evidence, artifact identities, and independent decision all refer to the same immutable
+candidate. Placeholder run IDs, digests, reviewers, or approval decisions are forbidden.
 
+The public pull request remains a draft until those hosted checks and review are complete.
 Real-device checks are separately enumerated in `tests/real_system_todos.py` and remain blocking
 for claims about physical target identity, ambiguous mutation outcomes, expected disconnects,
 and backend-specific compensation.
@@ -64,4 +72,4 @@ or insert placeholder provider identities.
 
 The acceptance condition is a schema-valid provider-backed assessment referencing the exact
 candidate SHA, exact wheel and image digests, official-client transport results, and an
-independent GitHub review.
+independent review. Until then the repository describes itself as a candidate adoption only.
