@@ -7,6 +7,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 Transport = Literal["stdio", "http"]
 
@@ -37,6 +38,25 @@ def _token(value: str | None, name: str) -> str | None:
     return value
 
 
+def _csv(name: str, default: str = "") -> tuple[str, ...]:
+    values = tuple(
+        item.strip()
+        for item in os.getenv(name, default).split(",")
+        if item.strip()
+    )
+    if len(values) != len(set(values)):
+        raise ValueError(f"{name} must not contain duplicates")
+    return values
+
+
+def _validate_https_url(value: str, name: str) -> None:
+    parsed = urlsplit(value)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError(f"{name} must be an absolute https URL")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise ValueError(f"{name} must not contain credentials or a fragment")
+
+
 @dataclass(frozen=True, slots=True)
 class Settings:
     transport: Transport
@@ -59,6 +79,16 @@ class Settings:
     sensitive_token: str | None = None
     dangerous_token: str | None = None
     max_response_bytes: int = 1024 * 1024
+    http_development_mode: bool = False
+    jwt_jwks_uri: str | None = None
+    jwt_issuer: str | None = None
+    jwt_audience: str | None = None
+    allowed_origins: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ("127.0.0.1", "localhost")
+    http_max_body_bytes: int = 1024 * 1024
+    http_max_header_bytes: int = 32 * 1024
+    http_max_connections: int = 64
+    http_queue_limit: int = 32
 
     @property
     def is_loopback(self) -> bool:
@@ -73,7 +103,7 @@ class Settings:
         return self.read_token
 
     @property
-    def has_auth(self) -> bool:
+    def has_static_auth(self) -> bool:
         return any(
             (
                 self.read_token,
@@ -84,18 +114,68 @@ class Settings:
             )
         )
 
+    @property
+    def has_jwt_auth(self) -> bool:
+        return all((self.jwt_jwks_uri, self.jwt_issuer, self.jwt_audience))
+
+    @property
+    def has_auth(self) -> bool:
+        return self.has_static_auth or self.has_jwt_auth
+
+    @property
+    def auth_profile(self) -> str:
+        if self.has_jwt_auth:
+            return "jwt-jwks"
+        if self.has_static_auth:
+            return "static-development"
+        return "stdio-local-process"
+
     def validate(self) -> None:
-        if self.transport == "http" and not self.is_loopback:
+        jwt_values = (self.jwt_jwks_uri, self.jwt_issuer, self.jwt_audience)
+        if any(jwt_values) and not all(jwt_values):
+            raise ValueError(
+                "MCP_AUTH_JWT_JWKS_URI, MCP_AUTH_JWT_ISSUER, and "
+                "MCP_AUTH_JWT_AUDIENCE must be configured together"
+            )
+        if self.jwt_jwks_uri:
+            _validate_https_url(self.jwt_jwks_uri, "MCP_AUTH_JWT_JWKS_URI")
+        if self.has_jwt_auth and self.has_static_auth:
+            raise ValueError("JWT and static HTTP authentication are mutually exclusive")
+
+        if self.transport == "http":
             if not self.has_auth:
                 raise ValueError(
-                    "MCP_AUTH_TOKEN or a scoped MCP auth token is required "
-                    "for a non-loopback HTTP bind"
+                    "HTTP transport requires a configured JWT/JWKS provider or "
+                    "development-only scoped static token"
                 )
-            if not self.trusted_proxy_tls:
+            if self.has_static_auth and not (
+                self.http_development_mode or self.mock_mode
+            ):
+                raise ValueError(
+                    "static HTTP tokens are development/test only; configure "
+                    "MCP_HTTP_DEVELOPMENT_MODE=1 or a JWT/JWKS provider"
+                )
+            if not self.is_loopback and not self.trusted_proxy_tls:
                 raise ValueError(
                     "non-loopback HTTP requires MCP_TRUSTED_PROXY_TLS=1 "
                     "and a TLS-terminating trusted proxy"
                 )
+            if not self.allowed_hosts:
+                raise ValueError("MCP_ALLOWED_HOSTS must not be empty for HTTP")
+            if any(host == "*" for host in self.allowed_hosts):
+                raise ValueError("MCP_ALLOWED_HOSTS must not use wildcard hosts")
+
+        for origin in self.allowed_origins:
+            parsed = urlsplit(origin)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "MCP_ALLOWED_ORIGINS entries must be absolute http(s) origins"
+                )
+            if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+                raise ValueError(
+                    "MCP_ALLOWED_ORIGINS entries must not include path/query/fragment"
+                )
+
         if (
             not self.mcp_path.startswith("/")
             or "?" in self.mcp_path
@@ -106,6 +186,7 @@ class Settings:
             )
         if self.artifact_root == Path("/"):
             raise ValueError("MCP_ARTIFACT_ROOT cannot be the filesystem root")
+
         tokens = [
             token
             for token in (
@@ -125,7 +206,7 @@ class Settings:
             )
 
     def static_tokens(self) -> dict[str, dict[str, object]]:
-        """Return principals whose scopes are independent of risk classification."""
+        """Return development principals with explicit, independent scopes."""
         tokens: dict[str, dict[str, object]] = {}
         if self.read_token:
             tokens[self.read_token] = {
@@ -201,8 +282,14 @@ class Settings:
         )
 
 
+def _default_allowed_hosts(bind_host: str) -> tuple[str, ...]:
+    if bind_host in {"127.0.0.1", "localhost"}:
+        return ("127.0.0.1", "localhost")
+    return (bind_host,)
+
+
 def load_settings() -> Settings:
-    transport_raw = os.getenv("MCP_TRANSPORT", "http").strip().lower()
+    transport_raw = os.getenv("MCP_TRANSPORT", "stdio").strip().lower()
     if transport_raw in {"streamable-http", "streamable_http"}:
         transport_raw = "http"
     if transport_raw not in {"stdio", "http"}:
@@ -233,9 +320,12 @@ def load_settings() -> Settings:
         os.getenv("MCP_AUTH_READ_TOKEN") or legacy,
         "MCP_AUTH_READ_TOKEN",
     )
+    bind_host = os.getenv("BIND_HOST", "127.0.0.1")
+    allowed_hosts = _csv("MCP_ALLOWED_HOSTS") or _default_allowed_hosts(bind_host)
+
     settings = Settings(
         transport=transport_raw,  # type: ignore[arg-type]
-        bind_host=os.getenv("BIND_HOST", "127.0.0.1"),
+        bind_host=bind_host,
         port=_int("MCP_PORT", 9102, minimum=1, maximum=65535),
         mcp_path=os.getenv("MCP_PATH", "/mcp"),
         write_enabled=_bool("ENABLE_WRITE_OPERATIONS", False),
@@ -287,6 +377,36 @@ def load_settings() -> Settings:
             1024 * 1024,
             minimum=1,
             maximum=16 * 1024 * 1024,
+        ),
+        http_development_mode=_bool("MCP_HTTP_DEVELOPMENT_MODE", False),
+        jwt_jwks_uri=os.getenv("MCP_AUTH_JWT_JWKS_URI") or None,
+        jwt_issuer=os.getenv("MCP_AUTH_JWT_ISSUER") or None,
+        jwt_audience=os.getenv("MCP_AUTH_JWT_AUDIENCE") or None,
+        allowed_origins=_csv("MCP_ALLOWED_ORIGINS"),
+        allowed_hosts=allowed_hosts,
+        http_max_body_bytes=_int(
+            "MCP_HTTP_MAX_BODY_BYTES",
+            1024 * 1024,
+            minimum=1024,
+            maximum=16 * 1024 * 1024,
+        ),
+        http_max_header_bytes=_int(
+            "MCP_HTTP_MAX_HEADER_BYTES",
+            32 * 1024,
+            minimum=1024,
+            maximum=256 * 1024,
+        ),
+        http_max_connections=_int(
+            "MCP_HTTP_MAX_CONNECTIONS",
+            64,
+            minimum=1,
+            maximum=4096,
+        ),
+        http_queue_limit=_int(
+            "MCP_HTTP_QUEUE_LIMIT",
+            32,
+            minimum=0,
+            maximum=4096,
         ),
     )
     settings.validate()
