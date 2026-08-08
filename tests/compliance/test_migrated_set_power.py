@@ -106,26 +106,25 @@ async def test_legacy_io_uses_authorized_address_after_cache_swap(
 
     assert resolver.revalidated == 1
     assert cache[0]["ip"] == "192.168.1.99"
-    request.assert_called_once_with(
-        "http://192.168.1.40/cm?cmnd=Power1%20ON", timeout=1.0
-    )
+    request.assert_called_once_with("http://192.168.1.40/cm?cmnd=Power1%20ON", timeout=1.0)
     assert result["ip"] == "192.168.1.40"
     assert result["actual_state"] == "ON"
 
 
 @pytest.mark.asyncio
-async def test_multibackend_iot_set_power_stays_disabled_without_evidence(
+async def test_multibackend_iot_set_power_stays_inactive_without_evidence(
     tmp_path: Path,
 ) -> None:
     gate = OperationGate(settings(tmp_path), TOOL_MANIFESTS, target_resolver=SwappingResolver([]))
     principal = Principal("operator", frozenset({"devices:admin"}), "stdio")
 
     manifest = gate.manifest("iot_set_power")
-    assert manifest["active_state"] == "disabled"
+    assert manifest["active_state"] == "inactive"
     assert manifest["idempotent"] is False
-    assert manifest["idempotency_mechanism"] == "none"
+    assert manifest["retryable"] is False
+    assert manifest["authorization_scopes"] == ["devices:power:write"]
 
-    with pytest.raises(CapabilityUnavailable, match="disabled"):
+    with pytest.raises(CapabilityUnavailable, match="inactive"):
         await gate.invoke_async(
             "iot_set_power",
             lambda identifier, state: {"identifier": identifier, "state": state},

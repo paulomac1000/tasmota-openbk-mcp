@@ -1,4 +1,4 @@
-"""Unit tests for typed capability introspection."""
+"""Unit tests for canonical capability introspection."""
 
 from __future__ import annotations
 
@@ -11,36 +11,41 @@ from tools.iot_meta import _describe_capabilities, register_iot_meta_tools
 pytestmark = pytest.mark.unit
 
 
-def test_describe_returns_typed_catalog():
+def test_describe_returns_canonical_catalog():
     data = _describe_capabilities()
     assert data["server"] == "local-home-devices-mcp"
-    assert data["schema_version"] == "2.1"
+    assert data["schema_version"] == 1
     assert data["supported_count"] == len(data["supported_capabilities"])
     assert data["active_count"] == len(data["active_capabilities"])
     assert data["supported_transports"] == ["stdio", "streamable-http"]
 
 
-def test_every_capability_has_runtime_fields():
+def test_every_capability_has_canonical_runtime_fields():
     required = {
+        "schema_version",
+        "id",
         "name",
+        "description",
+        "operation_kind",
         "risk",
-        "side_effects",
-        "confidentiality",
-        "idempotent",
-        "retryable",
-        "concurrent_safe",
-        "timeout_ms",
-        "target_binding",
         "active_state",
+        "authorization_scopes",
+        "concurrency",
+        "max_response_bytes",
     }
     for capability in _describe_capabilities()["supported_capabilities"]:
         assert not required - capability.keys()
+        assert "timeout_ms" not in capability
+        assert "concurrent_safe" not in capability
 
 
 def test_registration_uses_typed_result_and_does_not_swallow_failures(mock_mcp):
     register_iot_meta_tools(mock_mcp)
     function = mock_mcp.get_tool("describe_iot_capabilities")
     assert isinstance(function(), dict)
-    with patch("tools.iot_meta._describe_capabilities", side_effect=RuntimeError("boom")):
+    with patch(
+        "tools.iot_meta._describe_capabilities",
+        side_effect=RuntimeError("boom"),
+    ):
         with pytest.raises(RuntimeError, match="boom"):
             function()

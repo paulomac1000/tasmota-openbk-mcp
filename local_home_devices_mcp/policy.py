@@ -1,4 +1,4 @@
-"""Single async invocation gate shared by every supported transport."""
+"""Transport-independent authorization, targeting, concurrency, and ownership."""
 
 from __future__ import annotations
 
@@ -8,11 +8,17 @@ import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, TypeVar
 
 from .config import Settings
-from .manifests import ManifestError, normalize_catalog
+from .manifests import (
+    ManifestError,
+    is_runtime_active,
+    manifest_availability,
+    manifest_timeout_seconds,
+    normalize_catalog,
+)
 from .targeting import BoundTarget, TargetError, TargetResolver, validate_address
 
 T = TypeVar("T")
@@ -38,21 +44,42 @@ class Principal:
     target_ids: frozenset[str] | None = None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(slots=True)
+class BackendOwnership:
+    """Backend work that may outlive the client response deadline."""
+
+    completion: asyncio.Future[Any] | asyncio.Task[Any] | None = None
+
+
+@dataclass(slots=True)
 class InvocationContext:
     principal: Principal
     request_id: str
     deadline: float
     target: BoundTarget | None
+    ownership: BackendOwnership = field(default_factory=BackendOwnership)
 
 
 _current_context: ContextVar[InvocationContext | None] = ContextVar(
-    "mcp_invocation_context", default=None
+    "mcp_invocation_context",
+    default=None,
 )
 
 
 def current_context() -> InvocationContext | None:
     return _current_context.get()
+
+
+def register_backend_completion(
+    completion: asyncio.Future[Any] | asyncio.Task[Any],
+) -> None:
+    """Keep concurrency ownership until detached backend work actually stops."""
+    context = current_context()
+    if context is None:
+        raise RuntimeError("backend completion requires an invocation context")
+    if context.ownership.completion not in {None, completion}:
+        raise RuntimeError("invocation already owns another backend worker")
+    context.ownership.completion = completion
 
 
 class AsyncSlidingWindowLimiter:
@@ -75,37 +102,68 @@ class AsyncSlidingWindowLimiter:
 
 
 @dataclass(slots=True)
-class _LockEntry:
-    lock: asyncio.Lock
+class _PermitEntry:
+    semaphore: asyncio.Semaphore
+    limit: int
     users: int = 0
 
 
-class AsyncKeyedLockManager:
-    """Reference-counted lock table that cannot grow after entries become idle."""
+@dataclass(slots=True)
+class _PermitLease:
+    manager: "AsyncConcurrencyManager"
+    key: str
+    entry: _PermitEntry
+    released: bool = False
+
+    def release(self) -> None:
+        if self.released:
+            return
+        self.released = True
+        self.manager._release(self.key, self.entry)
+
+
+class AsyncConcurrencyManager:
+    """Bounded keyed semaphore registry implementing canonical scope + limit."""
 
     def __init__(self) -> None:
-        self._entries: dict[str, _LockEntry] = {}
-        self._guard = asyncio.Lock()
+        self._entries: dict[str, _PermitEntry] = {}
 
-    @asynccontextmanager
-    async def acquire(self, key: str, timeout: float) -> AsyncIterator[None]:
-        async with self._guard:
-            entry = self._entries.setdefault(key, _LockEntry(asyncio.Lock()))
-            entry.users += 1
+    async def acquire(
+        self,
+        key: str,
+        *,
+        limit: int,
+        timeout: float,
+        queue_limit: int | None = None,
+    ) -> _PermitLease:
+        entry = self._entries.get(key)
+        if entry is None:
+            entry = _PermitEntry(asyncio.Semaphore(limit), limit)
+            self._entries[key] = entry
+        elif entry.limit != limit:
+            raise PolicyError("concurrency contract changed while capability is active")
+        if queue_limit is not None and entry.users >= limit + queue_limit:
+            raise PolicyError("capability concurrency queue is full")
+
+        entry.users += 1
         acquired = False
         try:
-            await asyncio.wait_for(entry.lock.acquire(), timeout=timeout)
+            await asyncio.wait_for(entry.semaphore.acquire(), timeout=timeout)
             acquired = True
-            yield
+            return _PermitLease(self, key, entry)
         except TimeoutError as exc:
-            raise PolicyError("target is busy") from exc
+            raise PolicyError("capability concurrency wait exceeded deadline") from exc
         finally:
-            if acquired:
-                entry.lock.release()
-            async with self._guard:
+            if not acquired:
                 entry.users -= 1
-                if entry.users == 0 and not entry.lock.locked():
+                if entry.users == 0:
                     self._entries.pop(key, None)
+
+    def _release(self, key: str, entry: _PermitEntry) -> None:
+        entry.semaphore.release()
+        entry.users -= 1
+        if entry.users == 0 and self._entries.get(key) is entry:
+            self._entries.pop(key, None)
 
     @property
     def entry_count(self) -> int:
@@ -125,7 +183,11 @@ class OperationGate:
         self.catalog = normalize_catalog(raw_catalog)
         self.target_resolver = target_resolver
         self.rate_limiter = AsyncSlidingWindowLimiter(rate_limit_per_minute)
-        self.locks = AsyncKeyedLockManager()
+        self.concurrency = AsyncConcurrencyManager()
+        # Retain the old public attribute while callers migrate to the canonical
+        # concurrency manager.
+        self.locks = self.concurrency
+        self._supervisors: set[asyncio.Task[None]] = set()
 
     def manifest(self, tool_name: str) -> Mapping[str, Any]:
         try:
@@ -133,40 +195,62 @@ class OperationGate:
         except KeyError as exc:
             raise ManifestError(f"unclassified capability: {tool_name}") from exc
 
-    def _scope_required(self, manifest: Mapping[str, Any]) -> str:
-        if manifest["risk"] == "DANGEROUS":
-            return "devices:dangerous"
-        if manifest["side_effects"] in {"write", "destructive"}:
-            return "devices:write"
-        return "devices:read"
-
-    def authorize(self, tool_name: str, arguments: Mapping[str, Any], principal: Principal) -> None:
+    def authorize(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        principal: Principal,
+    ) -> None:
         manifest = self.manifest(tool_name)
         if tool_name == "iot_execute_command" and "force" in arguments:
-            raise PolicyError("model input cannot override dangerous-operation policy")
-        if manifest["active_state"] != "active":
-            raise CapabilityUnavailable(f"{tool_name} is {manifest['active_state']}")
-        if manifest["side_effects"] in {"write", "destructive"} and not self.settings.write_enabled:
+            raise PolicyError(
+                "model input cannot override dangerous-operation policy"
+            )
+        if not is_runtime_active(manifest):
+            raise CapabilityUnavailable(
+                f"{tool_name} is {manifest['active_state']} "
+                f"({manifest_availability(manifest)})"
+            )
+
+        operation = str(manifest["operation_kind"])
+        if operation in {"write", "destructive"} and not self.settings.write_enabled:
             raise PolicyError("write operations are disabled by the operator")
-        if manifest["risk"] == "DANGEROUS" and not self.settings.dangerous_enabled:
+        if (
+            operation == "destructive" or manifest["risk"] == "critical"
+        ) and not self.settings.dangerous_enabled:
             raise PolicyError("dangerous operations are disabled by the operator")
-        required = self._scope_required(manifest)
-        if required not in principal.scopes and "devices:admin" not in principal.scopes:
-            raise PolicyError(f"missing required scope: {required}")
-        if manifest["confidentiality"] in {"personal", "sensitive", "credential"} and not (
-            {"devices:sensitive", "devices:admin"} & principal.scopes
+
+        if "devices:admin" not in principal.scopes:
+            required = set(str(item) for item in manifest["authorization_scopes"])
+            missing = sorted(required - principal.scopes)
+            if missing:
+                raise PolicyError(f"missing required scopes: {', '.join(missing)}")
+
+        # Confirmation requires a verified server-side approval record.  No
+        # production capability is activated with this requirement until that
+        # verifier is wired at the typed-adapter boundary.
+        if manifest["requires_confirmation"]:
+            raise PolicyError(
+                "capability requires a server-verified approval record and is not invokable"
+            )
+
+        if (
+            tool_name == "iot_set_power"
+            and str(arguments.get("state", "")).upper() == "TOGGLE"
         ):
-            raise PolicyError("missing required scope: devices:sensitive")
-        if tool_name == "iot_set_power" and str(arguments.get("state", "")).upper() == "TOGGLE":
-            raise PolicyError("TOGGLE is non-idempotent; request explicit ON or OFF")
+            raise PolicyError(
+                "TOGGLE is non-idempotent; request explicit ON or OFF"
+            )
         if "timeout_seconds" in arguments:
-            maximum = manifest["timeout_ms"] / 1000
+            maximum = manifest_timeout_seconds(manifest)
             try:
                 requested = float(arguments["timeout_seconds"])
             except (TypeError, ValueError) as exc:
                 raise PolicyError("timeout_seconds must be numeric") from exc
             if requested <= 0 or requested > maximum:
-                raise PolicyError(f"timeout_seconds must be between 0 and {maximum:g}")
+                raise PolicyError(
+                    f"timeout_seconds must be between 0 and {maximum:g}"
+                )
         for key in ("target_id", "identifier", "ip", "ip_address"):
             value = arguments.get(key)
             if not isinstance(value, str):
@@ -179,7 +263,8 @@ class OperationGate:
                 continue
             if validated and not self.settings.allow_direct_ip_targets:
                 raise PolicyError(
-                    "literal IP targets are disabled; use an exact target_id or device name"
+                    "literal IP targets are disabled; use an exact target_id "
+                    "or device name"
                 )
 
     @staticmethod
@@ -190,32 +275,151 @@ class OperationGate:
                 return value
         return None
 
-    async def _resolve_target(self, arguments: Mapping[str, Any]) -> BoundTarget | None:
+    async def _resolve_target(
+        self,
+        arguments: Mapping[str, Any],
+    ) -> BoundTarget | None:
         selector = self.selector(arguments)
         if selector is None:
             return None
         if self.target_resolver is None:
-            # Target-bearing tools cannot silently bypass stable binding.
-            raise PolicyError("target resolver is unavailable for a target-bearing capability")
+            raise PolicyError(
+                "target resolver is unavailable for a target-bearing capability"
+            )
         return await self.target_resolver.resolve(selector)
 
     @staticmethod
-    def authorize_target(target: BoundTarget | None, principal: Principal) -> None:
+    def authorize_target(
+        target: BoundTarget | None,
+        principal: Principal,
+    ) -> None:
         if target is None or "devices:admin" in principal.scopes:
             return
-        if principal.target_ids is not None and target.target_id not in principal.target_ids:
-            raise PolicyError(f"principal is not authorized for target: {target.target_id}")
+        if (
+            principal.target_ids is not None
+            and target.target_id not in principal.target_ids
+        ):
+            raise PolicyError(
+                f"principal is not authorized for target: {target.target_id}"
+            )
+
+    @staticmethod
+    def _concurrency_key(
+        manifest: Mapping[str, Any],
+        principal: Principal,
+        target: BoundTarget | None,
+        arguments: Mapping[str, Any],
+    ) -> str:
+        concurrency = manifest["concurrency"]
+        scope = str(concurrency["scope"])
+        capability_id = str(manifest["id"])
+        if scope == "global":
+            return "global"
+        if scope == "capability":
+            return f"capability:{capability_id}"
+        if scope == "principal":
+            return f"principal:{principal.subject}"
+        if scope == "target":
+            if target is None:
+                raise PolicyError("target concurrency requires a bound target")
+            return f"target:{target.target_id}"
+        if scope == "principal-target":
+            if target is None:
+                raise PolicyError("principal-target concurrency requires a bound target")
+            return f"principal-target:{principal.subject}:{target.target_id}"
+        extensions = manifest.get("extensions")
+        key_argument = None
+        if isinstance(extensions, Mapping):
+            key_argument = extensions.get("concurrency_key_argument")
+        if scope in {"credential", "resource", "custom"}:
+            if not isinstance(key_argument, str) or not key_argument:
+                raise PolicyError(
+                    f"{scope} concurrency requires extensions.concurrency_key_argument"
+                )
+            value = arguments.get(key_argument)
+            if not isinstance(value, (str, int)) or str(value) == "":
+                raise PolicyError(
+                    f"missing concurrency key argument: {key_argument}"
+                )
+            return f"{scope}:{value}"
+        raise PolicyError(f"unsupported concurrency scope: {scope}")
+
+    async def _acquire_permits(
+        self,
+        manifest: Mapping[str, Any],
+        principal: Principal,
+        target: BoundTarget | None,
+        arguments: Mapping[str, Any],
+        timeout: float,
+    ) -> list[_PermitLease]:
+        concurrency = manifest["concurrency"]
+        key = self._concurrency_key(manifest, principal, target, arguments)
+        queue_limit = concurrency.get("queue_limit")
+        primary = await self.concurrency.acquire(
+            key,
+            limit=int(concurrency["limit"]),
+            timeout=timeout,
+            queue_limit=int(queue_limit) if queue_limit is not None else None,
+        )
+        leases = [primary]
+        global_limit = concurrency.get("global_limit")
+        if global_limit is None or concurrency["scope"] == "global":
+            return leases
+        try:
+            leases.append(
+                await self.concurrency.acquire(
+                    f"global-capability:{manifest['id']}",
+                    limit=int(global_limit),
+                    timeout=timeout,
+                )
+            )
+        except BaseException:
+            primary.release()
+            raise
+        return leases
+
+    def _defer_release(
+        self,
+        completion: asyncio.Future[Any] | asyncio.Task[Any],
+        leases: list[_PermitLease],
+    ) -> None:
+        async def release_after_backend() -> None:
+            try:
+                await asyncio.shield(completion)
+            except BaseException:
+                pass
+            finally:
+                for lease in reversed(leases):
+                    lease.release()
+
+        task = asyncio.create_task(release_after_backend())
+        self._supervisors.add(task)
+        task.add_done_callback(self._supervisors.discard)
+
+    @property
+    def supervisor_count(self) -> int:
+        return len(self._supervisors)
 
     @asynccontextmanager
     async def guard_async(
-        self, tool_name: str, arguments: Mapping[str, Any], principal: Principal
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        principal: Principal,
     ) -> AsyncIterator[Mapping[str, Any]]:
         manifest = self.manifest(tool_name)
         await self.rate_limiter.check(principal.subject)
         self.authorize(tool_name, arguments, principal)
         target = await self._resolve_target(arguments)
         self.authorize_target(target, principal)
-        timeout = manifest["timeout_ms"] / 1000
+        timeout = manifest_timeout_seconds(manifest)
+        leases = await self._acquire_permits(
+            manifest,
+            principal,
+            target,
+            arguments,
+            timeout,
+        )
         context = InvocationContext(
             principal=principal,
             request_id=f"req_{time.time_ns():x}",
@@ -223,19 +427,20 @@ class OperationGate:
             target=target,
         )
         token = _current_context.set(context)
-        lock_key = target.target_id if target else f"global:{tool_name}"
+        deferred = False
         try:
-            if manifest["concurrent_safe"]:
-                if target and self.target_resolver:
-                    await self.target_resolver.revalidate(target)
-                yield manifest
-            else:
-                async with self.locks.acquire(lock_key, timeout):
-                    if target and self.target_resolver:
-                        await self.target_resolver.revalidate(target)
-                    yield manifest
+            if target and self.target_resolver:
+                await self.target_resolver.revalidate(target)
+            yield manifest
         finally:
             _current_context.reset(token)
+            completion = context.ownership.completion
+            if completion is not None and not completion.done():
+                deferred = True
+                self._defer_release(completion, leases)
+            if not deferred:
+                for lease in reversed(leases):
+                    lease.release()
 
     async def invoke_async(
         self,
@@ -247,9 +452,10 @@ class OperationGate:
         bounded = dict(arguments)
         signature = inspect.signature(function)
         manifest = self.manifest(tool_name)
+        maximum = manifest_timeout_seconds(manifest)
         if "timeout_seconds" in signature.parameters:
-            requested = float(bounded.get("timeout_seconds", manifest["timeout_ms"] / 1000))
-            bounded["timeout_seconds"] = max(0.1, min(requested, manifest["timeout_ms"] / 1000))
+            requested = float(bounded.get("timeout_seconds", maximum))
+            bounded["timeout_seconds"] = max(0.1, min(requested, maximum))
         async with self.guard_async(tool_name, bounded, principal):
             result = function(**bounded)
             if inspect.isawaitable(result):
@@ -266,5 +472,9 @@ class OperationGate:
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(self.invoke_async(tool_name, function, arguments, principal))
-        raise RuntimeError("invoke() cannot be used in an active event loop; use invoke_async()")
+            return asyncio.run(
+                self.invoke_async(tool_name, function, arguments, principal)
+            )
+        raise RuntimeError(
+            "invoke() cannot be used in an active event loop; use invoke_async()"
+        )

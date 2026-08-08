@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import threading
-import time
+import asyncio
 
 import pytest
 
-from local_home_devices_mcp.config import load_settings
-from local_home_devices_mcp.mock_runtime import MOCK_MANIFESTS
+from local_home_devices_mcp.config import Settings
+from local_home_devices_mcp.mock_runtime import MOCK_MANIFESTS, MockTargetResolver
+from local_home_devices_mcp.targeting import TargetError
 from local_home_devices_mcp.policy import (
     OperationGate,
     PolicyError,
@@ -18,65 +18,107 @@ from local_home_devices_mcp.policy import (
 pytestmark = pytest.mark.unit
 
 READ = Principal("reader", frozenset({"devices:read"}), "test")
-WRITER = Principal("writer", frozenset({"devices:read", "devices:write"}), "test")
+POWER_WRITER = Principal("writer", frozenset({"devices:power:write"}), "test")
+GENERIC_WRITER = Principal("writer", frozenset({"devices:write"}), "test")
 ADMIN = Principal("admin", frozenset({"devices:admin"}), "test")
 
 
-def test_read_scope_can_read():
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
-    result = gate.invoke(
+def gate(*, write_enabled: bool = True, rate_limit: int = 60) -> OperationGate:
+    base = Settings.for_mock()
+    settings = Settings(
+        **{
+            **{field: getattr(base, field) for field in base.__dataclass_fields__},
+            "write_enabled": write_enabled,
+        }
+    )
+    return OperationGate(
+        settings,
+        MOCK_MANIFESTS,
+        target_resolver=MockTargetResolver(),
+        rate_limit_per_minute=rate_limit,
+    )
+
+
+@pytest.mark.asyncio
+async def test_read_scope_can_read():
+    runtime = gate()
+    result = await runtime.invoke_async(
         "mock_get_state",
         lambda identifier: identifier,
-        {"identifier": "dev_1"},
+        {"identifier": "dev_mock_light"},
         READ,
     )
-    assert result == "dev_1"
+    assert result == "dev_mock_light"
 
 
-def test_read_scope_cannot_write(monkeypatch):
-    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
-    with pytest.raises(PolicyError, match="scope"):
-        gate.invoke(
+@pytest.mark.asyncio
+async def test_generic_write_scope_does_not_authorize_power_write():
+    runtime = gate()
+    with pytest.raises(PolicyError, match="devices:power:write"):
+        await runtime.invoke_async(
             "mock_set_power",
             lambda identifier, power: power,
-            {"identifier": "dev_1", "power": True},
-            READ,
+            {"identifier": "dev_mock_light", "power": True},
+            GENERIC_WRITER,
         )
 
 
-def test_write_requires_operator_enablement():
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
+@pytest.mark.asyncio
+async def test_exact_write_scope_can_write_when_operator_enabled():
+    runtime = gate()
+    result = await runtime.invoke_async(
+        "mock_set_power",
+        lambda identifier, power: power,
+        {"identifier": "dev_mock_light", "power": True},
+        POWER_WRITER,
+    )
+    assert result is True
+
+
+@pytest.mark.asyncio
+async def test_write_requires_operator_enablement():
+    runtime = gate(write_enabled=False)
     with pytest.raises(PolicyError, match="disabled"):
-        gate.invoke(
+        await runtime.invoke_async(
             "mock_set_power",
             lambda identifier, power: power,
-            {"identifier": "dev_1", "power": True},
-            WRITER,
+            {"identifier": "dev_mock_light", "power": True},
+            POWER_WRITER,
         )
 
 
-def test_request_context_is_scoped(monkeypatch):
-    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
-    observed = gate.invoke(
+@pytest.mark.asyncio
+async def test_request_context_is_scoped():
+    runtime = gate()
+    observed = await runtime.invoke_async(
         "mock_set_power",
         lambda identifier, power: current_context(),
-        {"identifier": "dev_1", "power": True},
-        WRITER,
+        {"identifier": "dev_mock_light", "power": True},
+        POWER_WRITER,
     )
     assert observed is not None and observed.principal.subject == "writer"
     assert current_context() is None
 
 
-def test_rate_limit_is_per_principal():
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS, rate_limit_per_minute=1)
-    gate.invoke("mock_get_state", lambda identifier: identifier, {"identifier": "dev_1"}, READ)
+@pytest.mark.asyncio
+async def test_rate_limit_is_per_principal():
+    runtime = gate(rate_limit=1)
+    await runtime.invoke_async(
+        "mock_get_state",
+        lambda identifier: identifier,
+        {"identifier": "dev_mock_light"},
+        READ,
+    )
     with pytest.raises(RateLimitExceeded):
-        gate.invoke("mock_get_state", lambda identifier: identifier, {"identifier": "dev_1"}, READ)
+        await runtime.invoke_async(
+            "mock_get_state",
+            lambda identifier: identifier,
+            {"identifier": "dev_mock_light"},
+            READ,
+        )
 
 
-def test_model_force_argument_is_rejected(monkeypatch):
+def test_model_force_argument_is_rejected():
     raw = {
         "iot_execute_command": {
             **MOCK_MANIFESTS["mock_set_power"],
@@ -85,59 +127,49 @@ def test_model_force_argument_is_rejected(monkeypatch):
             "side_effects": "destructive",
         }
     }
-    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
-    monkeypatch.setenv("ENABLE_DANGEROUS_OPERATIONS", "1")
-    gate = OperationGate(load_settings(), raw)
+    runtime = OperationGate(Settings.for_mock(), raw)
     with pytest.raises(PolicyError, match="cannot override"):
-        gate.authorize("iot_execute_command", {"force": True}, ADMIN)
+        runtime.authorize("iot_execute_command", {"force": True}, ADMIN)
 
 
-def test_non_concurrent_tool_is_serialized(monkeypatch):
-    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
-    order: list[str] = []
+@pytest.mark.asyncio
+async def test_target_concurrency_honors_limit_one():
+    runtime = gate()
+    active = 0
+    max_active = 0
 
-    def operation(identifier: str, power: bool) -> bool:
-        order.append("start")
-        time.sleep(0.03)
-        order.append("end")
+    async def operation(identifier: str, power: bool) -> bool:
+        nonlocal active, max_active
+        active += 1
+        max_active = max(max_active, active)
+        await asyncio.sleep(0.02)
+        active -= 1
         return power
 
-    threads = [
-        threading.Thread(
-            target=lambda: gate.invoke(
-                "mock_set_power", operation, {"identifier": "same", "power": True}, WRITER
-            )
-        )
-        for _ in range(2)
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    assert order == ["start", "end", "start", "end"]
-
-
-def test_sensitive_read_requires_sensitive_scope():
-    raw = {
-        "secret_read": {
-            **MOCK_MANIFESTS["mock_get_state"],
-            "name": "secret_read",
-            "confidentiality": "sensitive",
-        }
-    }
-    gate = OperationGate(load_settings(), raw)
-    with pytest.raises(PolicyError, match="devices:sensitive"):
-        gate.authorize("secret_read", {}, READ)
+    await asyncio.gather(
+        runtime.invoke_async(
+            "mock_set_power",
+            operation,
+            {"identifier": "Mock Light", "power": True},
+            POWER_WRITER,
+        ),
+        runtime.invoke_async(
+            "mock_set_power",
+            operation,
+            {"identifier": "dev_mock_light", "power": False},
+            POWER_WRITER,
+        ),
+    )
+    assert max_active == 1
 
 
 def test_timeout_above_manifest_budget_is_rejected():
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
+    runtime = gate()
     with pytest.raises(PolicyError, match="timeout_seconds"):
-        gate.authorize("mock_get_state", {"timeout_seconds": 2}, READ)
+        runtime.authorize("mock_get_state", {"timeout_seconds": 2}, READ)
 
 
 def test_hostname_in_ip_parameter_is_rejected():
-    gate = OperationGate(load_settings(), MOCK_MANIFESTS)
-    with pytest.raises(PolicyError, match="literal authorized IPv4"):
-        gate.authorize("mock_get_state", {"ip_address": "localhost"}, READ)
+    runtime = gate()
+    with pytest.raises(TargetError, match="invalid IP address"):
+        runtime.authorize("mock_get_state", {"ip_address": "localhost"}, READ)

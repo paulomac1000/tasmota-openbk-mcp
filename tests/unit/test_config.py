@@ -26,6 +26,7 @@ def test_public_bind_requires_auth(monkeypatch):
 def test_public_bind_with_token_is_valid(monkeypatch):
     monkeypatch.setenv("BIND_HOST", "0.0.0.0")
     monkeypatch.setenv("MCP_AUTH_TOKEN", "t" * 32)
+    monkeypatch.setenv("MCP_TRUSTED_PROXY_TLS", "1")
     assert load_settings().auth_token == "t" * 32
 
 

@@ -44,13 +44,18 @@ def test_static_tokens_have_separate_scopes(tmp_path: Path):
         tmp_path,
         trusted_proxy_tls=True,
         read_token="r" * 32,
+        sensitive_token="s" * 32,
         write_token="w" * 32,
+        dangerous_token="d" * 32,
         admin_token="a" * 32,
     )
     config.validate()
     tokens = config.static_tokens()
     assert tokens["r" * 32]["scopes"] == ["devices:read"]
+    assert "camera:snapshot:sensitive" in tokens["s" * 32]["scopes"]
+    assert "devices:power:write" in tokens["w" * 32]["scopes"]
     assert "devices:dangerous" not in tokens["w" * 32]["scopes"]
+    assert "camera:gate:write" in tokens["d" * 32]["scopes"]
     assert tokens["a" * 32]["scopes"] == [
         "devices:read",
         "devices:sensitive",

@@ -1,17 +1,29 @@
-"""FastMCP composition root with one policy pipeline for every transport."""
+"""FastMCP composition root with one canonical policy pipeline."""
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any
+from typing import Any, Mapping
 
 from .artifacts import ArtifactError, ArtifactStore
 from .config import Settings, load_settings
-from .legacy_compat import LegacyRegistrationProxy, LegacyTargetResolver, LegacyToolFailure
-from .manifests import ManifestError, normalize_catalog
+from .legacy_compat import (
+    LegacyRegistrationProxy,
+    LegacyTargetResolver,
+    LegacyToolFailure,
+)
+from .manifests import (
+    MANIFEST_SCHEMA_VERSION,
+    SERVER_HARD_MAX_RESPONSE_BYTES,
+    ManifestError,
+    is_runtime_active,
+    manifest_timeout_seconds,
+    normalize_catalog,
+)
 from .mock_runtime import MockTargetResolver
 from .policy import OperationGate, PolicyError, Principal, current_context
 from .targeting import TargetError
@@ -30,7 +42,7 @@ def _build_auth(settings: Settings) -> Any | None:
         return None
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
-    return StaticTokenVerifier(tokens=tokens, required_scopes=["devices:read"])
+    return StaticTokenVerifier(tokens=tokens, required_scopes=[])
 
 
 def _principal_from_fastmcp(settings: Settings) -> Principal:
@@ -59,7 +71,9 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
         or claims.get("client_id")
         or "authenticated"
     )
-    scopes = frozenset(str(item) for item in (getattr(token, "scopes", None) or []))
+    scopes = frozenset(
+        str(item) for item in (getattr(token, "scopes", None) or [])
+    )
     raw_targets = claims.get("targets")
     if raw_targets is None or raw_targets == "*":
         target_ids = None
@@ -75,7 +89,54 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
     )
 
 
-def _install_policy_middleware(mcp: Any, gate: OperationGate, settings: Settings) -> None:
+def _jsonable(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, bytes):
+        return base64.b64encode(value).decode("ascii")
+    if isinstance(value, Mapping):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_jsonable(item) for item in value]
+    model_dump = getattr(value, "model_dump", None)
+    if callable(model_dump):
+        try:
+            return _jsonable(model_dump(mode="json"))
+        except TypeError:
+            return _jsonable(model_dump())
+    if hasattr(value, "__dict__"):
+        return _jsonable(vars(value))
+    return str(value)
+
+
+def encoded_response_bytes(value: Any) -> int:
+    """Estimate the final JSON-compatible MCP payload size deterministically."""
+    encoded = json.dumps(
+        _jsonable(value),
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return len(encoded)
+
+
+def effective_response_limit(
+    manifest: Mapping[str, Any],
+    settings: Settings,
+) -> int:
+    """Combine the capability limit with immutable server hard ceilings."""
+    return min(
+        SERVER_HARD_MAX_RESPONSE_BYTES,
+        settings.max_response_bytes,
+        int(manifest["max_response_bytes"]),
+    )
+
+
+def _install_policy_middleware(
+    mcp: Any,
+    gate: OperationGate,
+    settings: Settings,
+) -> None:
     from fastmcp.exceptions import ToolError
     from fastmcp.server.middleware import Middleware
     from tools.validators import ValidationError
@@ -87,22 +148,38 @@ def _install_policy_middleware(mcp: Any, gate: OperationGate, settings: Settings
             principal = _principal_from_fastmcp(settings)
             try:
                 manifest = gate.manifest(name)
-                async with gate.guard_async(name, arguments, principal):
-                    async with asyncio.timeout(manifest["timeout_ms"] / 1000):
-                        return await call_next(context)
+                timeout = manifest_timeout_seconds(manifest)
+                async with asyncio.timeout(timeout):
+                    async with gate.guard_async(name, arguments, principal):
+                        result = await call_next(context)
+                        maximum = effective_response_limit(manifest, settings)
+                        if encoded_response_bytes(result) > maximum:
+                            raise ToolError(
+                                f"final response exceeds {maximum} bytes"
+                            )
+                        return result
             except TimeoutError as exc:
                 raise ToolError(
-                    "operation deadline exceeded; mutation outcome may require reconciliation"
+                    "operation deadline exceeded; mutation outcome may be "
+                    "unknown and requires reconciliation"
                 ) from exc
             except LegacyToolFailure as exc:
                 raise ToolError(f"{exc.code}: {exc}") from exc
             except ToolError:
                 raise
-            except (PolicyError, ManifestError, TargetError, ValidationError, ArtifactError) as exc:
+            except (
+                PolicyError,
+                ManifestError,
+                TargetError,
+                ValidationError,
+                ArtifactError,
+            ) as exc:
                 raise ToolError(str(exc)) from exc
             except Exception as exc:
                 logging.getLogger(__name__).error(
-                    "tool invocation failed for %s: %s", name, type(exc).__name__
+                    "tool invocation failed for %s: %s",
+                    name,
+                    type(exc).__name__,
                 )
                 raise ToolError("internal tool failure") from exc
 
@@ -133,12 +210,16 @@ def _register_legacy_tools(mcp: Any) -> None:
 
 
 def _register_mock_tools(
-    mcp: Any, artifact_store: ArtifactStore, settings: Settings
+    mcp: Any,
+    artifact_store: ArtifactStore,
+    settings: Settings,
 ) -> None:
     state = {"power": False, "brightness": 50}
 
     @mcp.tool
-    def mock_get_state(identifier: str = "dev_mock_light") -> dict[str, Any]:
+    def mock_get_state(
+        identifier: str = "dev_mock_light",
+    ) -> dict[str, Any]:
         """Return deterministic state from the zero-I/O mock device."""
         return {"identifier": identifier, **state}
 
@@ -149,12 +230,16 @@ def _register_mock_tools(
         return {"identifier": identifier, **state}
 
     @mcp.tool
-    def mock_capture_snapshot(identifier: str = "dev_mock_light") -> dict[str, Any]:
-        """Persist a deterministic mock image through the confined artifact store."""
+    def mock_capture_snapshot(
+        identifier: str = "dev_mock_light",
+    ) -> dict[str, Any]:
+        """Persist a deterministic mock image through the confined store."""
         payload = b"\x89PNG\r\n\x1a\nmock-device-snapshot"
         context = current_context()
         if context is None or context.target is None:
-            raise ArtifactError("artifact creation requires an authorized target context")
+            raise ArtifactError(
+                "artifact creation requires an authorized target context"
+            )
         metadata = artifact_store.save(
             payload,
             "image/png",
@@ -174,16 +259,28 @@ def _register_mock_tools(
 
 
 def _register_artifact_resource(
-    mcp: Any, artifact_store: ArtifactStore, settings: Settings
+    mcp: Any,
+    artifact_store: ArtifactStore,
+    settings: Settings,
 ) -> None:
-    """Expose artifact reads in every runtime; writers can be migrated independently."""
-
-    @mcp.resource("artifact://{artifact_id}", mime_type="application/octet-stream")
+    @mcp.resource(
+        "artifact://{artifact_id}",
+        mime_type="application/octet-stream",
+    )
     def read_artifact(artifact_id: str) -> bytes:
         """Read one integrity-checked artifact by opaque ID."""
         principal = _principal_from_fastmcp(settings)
-        if not ({"devices:sensitive", "devices:admin"} & principal.scopes):
-            raise ArtifactError("missing required scope: devices:sensitive")
+        if not (
+            {
+                "devices:sensitive",
+                "camera:snapshot:sensitive",
+                "devices:admin",
+            }
+            & principal.scopes
+        ):
+            raise ArtifactError(
+                "missing sensitive artifact-read authorization scope"
+            )
         _metadata, content = artifact_store.read(
             artifact_id,
             requester_subject=principal.subject,
@@ -192,7 +289,9 @@ def _register_artifact_resource(
         return content
 
 
-def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
+def build_server(
+    settings: Settings | None = None,
+) -> tuple[Any, OperationGate]:
     """Build a server without starting a transport or performing device I/O."""
     from fastmcp import FastMCP
     from starlette.responses import JSONResponse
@@ -210,7 +309,11 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
         target_resolver = LegacyTargetResolver(settings)
 
     catalog = normalize_catalog(raw_catalog)
-    gate = OperationGate(settings, catalog, target_resolver=target_resolver)
+    gate = OperationGate(
+        settings,
+        catalog,
+        target_resolver=target_resolver,
+    )
     artifact_store = ArtifactStore(
         settings.artifact_root,
         max_artifact_bytes=settings.max_artifact_bytes,
@@ -232,7 +335,7 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
     _register_artifact_resource(mcp, artifact_store, settings)
 
     for name, manifest in catalog.items():
-        if manifest["active_state"] != "active":
+        if not is_runtime_active(manifest):
             mcp.disable(keys={f"tool:{name}"})
     _install_policy_middleware(mcp, gate, settings)
 
@@ -255,7 +358,7 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
         active = {
             name
             for name, manifest in catalog.items()
-            if manifest["active_state"] == "active"
+            if is_runtime_active(manifest)
         }
         unexpected_registered = sorted(registered - governed)
         missing_active = sorted(active - registered)
@@ -271,7 +374,9 @@ def build_server(settings: Settings | None = None) -> tuple[Any, OperationGate]:
                 "governed": len(governed),
                 "unexpected_registered": unexpected_registered,
                 "missing_active": missing_active,
-                "inactive_or_optional": sorted((governed - active) - registered),
+                "inactive_or_optional": sorted(
+                    (governed - active) - registered
+                ),
             },
             status_code=200 if status == "ready" else 503,
         )
@@ -299,15 +404,21 @@ def capability_document(settings: Settings | None = None) -> str:
         from .mock_runtime import MOCK_MANIFESTS as raw
     else:
         from tools.constants import TOOL_MANIFESTS as raw
+    catalog = normalize_catalog(raw)
     return json.dumps(
         {
-            "schema_version": "2.1",
+            "schema_version": MANIFEST_SCHEMA_VERSION,
             "server_version": package_version(),
             "sdk_family": "fastmcp",
-            "sdk_version": "3.4.4",
+            "sdk_version": "3.4.6",
             "supported_transports": ["stdio", "streamable-http"],
             "active_transport": settings.transport,
-            "capabilities": list(normalize_catalog(raw).values()),
+            "active_capability_ids": sorted(
+                name
+                for name, manifest in catalog.items()
+                if is_runtime_active(manifest)
+            ),
+            "capabilities": list(catalog.values()),
         },
         sort_keys=True,
     )

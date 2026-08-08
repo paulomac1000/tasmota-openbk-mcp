@@ -103,9 +103,7 @@ def fake_fastmcp(monkeypatch: pytest.MonkeyPatch):
     modules["fastmcp.exceptions"].ToolError = FakeToolError  # type: ignore[attr-defined]
     modules["fastmcp.server.middleware"].Middleware = FakeMiddleware  # type: ignore[attr-defined]
     jwt_module = modules["fastmcp.server.auth.providers.jwt"]
-    jwt_module.StaticTokenVerifier = (  # type: ignore[attr-defined]
-        FakeStaticTokenVerifier
-    )
+    jwt_module.StaticTokenVerifier = FakeStaticTokenVerifier  # type: ignore[attr-defined]
     modules["fastmcp.server.dependencies"].get_access_token = (  # type: ignore[attr-defined]
         lambda: access_token["value"]
     )
@@ -136,9 +134,7 @@ def settings(tmp_path: Path, **overrides: Any) -> Settings:
     return Settings(**values)
 
 
-def test_auth_and_principal_roles(
-    tmp_path: Path, fake_fastmcp: dict[str, Any]
-) -> None:
+def test_auth_and_principal_roles(tmp_path: Path, fake_fastmcp: dict[str, Any]) -> None:
     from local_home_devices_mcp.composition import _build_auth, _principal_from_fastmcp
 
     stdio = settings(tmp_path)
@@ -155,7 +151,7 @@ def test_auth_and_principal_roles(
         admin_token="a" * 32,
     )
     verifier = _build_auth(http)
-    assert verifier.required_scopes == ["devices:read"]
+    assert verifier.required_scopes == []
     assert verifier.tokens["r" * 32]["scopes"] == ["devices:read"]
     assert _principal_from_fastmcp(http).subject == "anonymous-loopback-http"
 
@@ -227,6 +223,28 @@ async def test_mock_server_registration_routes_artifact_and_middleware(
 
 
 @pytest.mark.asyncio
+async def test_capability_response_limit_is_enforced_at_mcp_boundary(
+    tmp_path: Path, fake_fastmcp: dict[str, Any]
+) -> None:
+    from local_home_devices_mcp.composition import build_server
+
+    build_server(settings(tmp_path))
+    mcp = FakeFastMCP.last
+    assert mcp is not None
+    context = SimpleNamespace(
+        message=SimpleNamespace(
+            name="mock_get_state", arguments={"identifier": "dev_mock_light"}
+        )
+    )
+
+    async def call_next(_context: Any) -> dict[str, str]:
+        return {"value": "x" * (40 * 1024)}
+
+    with pytest.raises(FakeToolError, match="final response exceeds 32768 bytes"):
+        await mcp.middlewares[0].on_call_tool(context, call_next)
+
+
+@pytest.mark.asyncio
 async def test_artifact_resource_rejects_read_scope(
     tmp_path: Path, fake_fastmcp: dict[str, Any]
 ) -> None:
@@ -271,7 +289,8 @@ def test_capability_document_is_zero_io(tmp_path: Path) -> None:
     from local_home_devices_mcp.composition import capability_document
 
     payload = json.loads(capability_document(settings(tmp_path)))
-    assert payload["sdk_version"] == "3.4.4"
+    assert payload["schema_version"] == 1
+    assert payload["sdk_version"] == "3.4.6"
     assert payload["active_transport"] == "stdio"
     assert {item["name"] for item in payload["capabilities"]} == {
         "mock_get_state",

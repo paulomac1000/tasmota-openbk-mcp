@@ -15,7 +15,7 @@ concurrency:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-  AI_SKILLS_REVISION: 661ff01a5e70d58d6c94a12545b24647e52063ed
+  AI_SKILLS_REVISION: c6dc6b13b2dd40b6e087140cd071b45067d75b39
 
 jobs:
   quality:
@@ -52,6 +52,17 @@ jobs:
         run: python -m compileall -q tools
       - name: Security scan
         run: bandit -r local_home_devices_mcp tools -ll
+      - name: Validate canonical capability manifests
+        run: |
+          rm -rf /tmp/capability-manifests
+          python scripts/export_capability_manifests.py \
+            --output /tmp/capability-manifests/default
+          python scripts/export_capability_manifests.py \
+            --mock --output /tmp/capability-manifests/mock
+          python .standards/contracts/validate_capability_manifest.py \
+            --schema .standards/contracts/capability-manifest.schema.json \
+            /tmp/capability-manifests/default/*.json \
+            /tmp/capability-manifests/mock/*.json
       - name: Validate AFDS documentation
         run: python .standards/skills/afds-doc-writer/validate.py README.md docs
       - name: Audit and validate AGENTS instructions
