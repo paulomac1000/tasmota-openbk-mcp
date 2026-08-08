@@ -1,22 +1,19 @@
-"""FastMCP composition root with one canonical policy pipeline."""
+"""FastMCP composition root with one canonical public-component policy kernel."""
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import logging
+import time
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping, TypeVar
 
 from .artifacts import ArtifactError, ArtifactStore
 from .config import Settings, load_settings
-from .legacy_compat import (
-    LegacyRegistrationProxy,
-    LegacyTargetResolver,
-    LegacyToolFailure,
-)
+from .legacy_compat import LegacyRegistrationProxy, LegacyTargetResolver, LegacyToolFailure
 from .manifests import (
+    ARTIFACT_READ_MANIFEST,
     MANIFEST_SCHEMA_VERSION,
     SERVER_HARD_MAX_RESPONSE_BYTES,
     ManifestError,
@@ -27,6 +24,12 @@ from .manifests import (
 from .mock_runtime import MockTargetResolver
 from .policy import OperationGate, PolicyError, Principal, current_context
 from .targeting import TargetError
+
+T = TypeVar("T")
+
+
+class PublicInvocationError(RuntimeError):
+    """Safe error crossing a public MCP component boundary."""
 
 
 def package_version() -> str:
@@ -46,24 +49,28 @@ def _build_auth(settings: Settings) -> Any | None:
 
 
 def _principal_from_fastmcp(settings: Settings) -> Principal:
-    try:
-        from fastmcp.server.dependencies import get_access_token
+    from fastmcp.server.dependencies import get_access_token
 
+    try:
         token = get_access_token()
-    except Exception:
+    except RuntimeError as exc:
+        if settings.transport != "stdio":
+            raise PolicyError("HTTP authentication context is unavailable") from exc
         token = None
+
     if token is None:
         if settings.transport == "stdio":
             return Principal(
-                subject="trusted-local-process",
-                scopes=frozenset({"devices:admin"}),
-                transport="stdio",
+                "trusted-local-process",
+                frozenset({"devices:admin"}),
+                "stdio",
             )
         return Principal(
-            subject="anonymous-loopback-http",
-            scopes=frozenset({"devices:read"}),
-            transport="http",
+            "anonymous-loopback-http",
+            frozenset({"devices:read"}),
+            "http",
         )
+
     claims = getattr(token, "claims", None) or {}
     subject = str(
         getattr(token, "client_id", None)
@@ -81,22 +88,17 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
         target_ids = frozenset({raw_targets})
     else:
         target_ids = frozenset(str(item) for item in raw_targets)
-    return Principal(
-        subject=subject,
-        scopes=scopes,
-        transport="http",
-        target_ids=target_ids,
-    )
+    return Principal(subject, scopes, "http", target_ids)
 
 
 def _jsonable(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if value is None or isinstance(value, str | int | float | bool):
         return value
     if isinstance(value, bytes):
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
+    if isinstance(value, list | tuple | set | frozenset):
         return [_jsonable(item) for item in value]
     model_dump = getattr(value, "model_dump", None)
     if callable(model_dump):
@@ -110,7 +112,6 @@ def _jsonable(value: Any) -> Any:
 
 
 def encoded_response_bytes(value: Any) -> int:
-    """Estimate the final JSON-compatible MCP payload size deterministically."""
     encoded = json.dumps(
         _jsonable(value),
         ensure_ascii=False,
@@ -124,12 +125,61 @@ def effective_response_limit(
     manifest: Mapping[str, Any],
     settings: Settings,
 ) -> int:
-    """Combine the capability limit with immutable server hard ceilings."""
     return min(
         SERVER_HARD_MAX_RESPONSE_BYTES,
         settings.max_response_bytes,
         int(manifest["max_response_bytes"]),
     )
+
+
+async def _invoke_public_component(
+    gate: OperationGate,
+    settings: Settings,
+    capability_name: str,
+    arguments: Mapping[str, Any],
+    principal: Principal,
+    callback: Callable[[], Awaitable[T]],
+) -> T:
+    """Run every public MCP component through the same governance kernel."""
+    manifest = gate.manifest(capability_name)
+    deadline = time.monotonic() + manifest_timeout_seconds(manifest)
+    try:
+        async with gate.guard_async(
+            capability_name,
+            arguments,
+            principal,
+            deadline=deadline,
+        ):
+            result = await callback()
+            maximum = effective_response_limit(manifest, settings)
+            if encoded_response_bytes(result) > maximum:
+                raise PublicInvocationError(
+                    f"final response exceeds {maximum} bytes"
+                )
+            return result
+    except TimeoutError as exc:
+        raise PublicInvocationError(
+            "operation deadline exceeded; mutation outcome may be unknown "
+            "and requires reconciliation"
+        ) from exc
+    except LegacyToolFailure as exc:
+        raise PublicInvocationError(f"{exc.code}: {exc}") from exc
+    except PublicInvocationError:
+        raise
+    except (
+        PolicyError,
+        ManifestError,
+        TargetError,
+        ArtifactError,
+    ) as exc:
+        raise PublicInvocationError(str(exc)) from exc
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "public component failed for %s: %s",
+            capability_name,
+            type(exc).__name__,
+        )
+        raise PublicInvocationError("internal component failure") from exc
 
 
 def _install_policy_middleware(
@@ -146,42 +196,24 @@ def _install_policy_middleware(
             name = str(context.message.name)
             arguments = dict(context.message.arguments or {})
             principal = _principal_from_fastmcp(settings)
+
+            async def callback() -> Any:
+                try:
+                    return await call_next(context)
+                except ValidationError as exc:
+                    raise PublicInvocationError(str(exc)) from exc
+
             try:
-                manifest = gate.manifest(name)
-                timeout = manifest_timeout_seconds(manifest)
-                async with asyncio.timeout(timeout):
-                    async with gate.guard_async(name, arguments, principal):
-                        result = await call_next(context)
-                        maximum = effective_response_limit(manifest, settings)
-                        if encoded_response_bytes(result) > maximum:
-                            raise ToolError(
-                                f"final response exceeds {maximum} bytes"
-                            )
-                        return result
-            except TimeoutError as exc:
-                raise ToolError(
-                    "operation deadline exceeded; mutation outcome may be "
-                    "unknown and requires reconciliation"
-                ) from exc
-            except LegacyToolFailure as exc:
-                raise ToolError(f"{exc.code}: {exc}") from exc
-            except ToolError:
-                raise
-            except (
-                PolicyError,
-                ManifestError,
-                TargetError,
-                ValidationError,
-                ArtifactError,
-            ) as exc:
-                raise ToolError(str(exc)) from exc
-            except Exception as exc:
-                logging.getLogger(__name__).error(
-                    "tool invocation failed for %s: %s",
+                return await _invoke_public_component(
+                    gate,
+                    settings,
                     name,
-                    type(exc).__name__,
+                    arguments,
+                    principal,
+                    callback,
                 )
-                raise ToolError("internal tool failure") from exc
+            except PublicInvocationError as exc:
+                raise ToolError(str(exc)) from exc
 
     mcp.add_middleware(InvocationPolicyMiddleware())
 
@@ -209,23 +241,15 @@ def _register_legacy_tools(mcp: Any) -> None:
     register_hikvision_tools(proxy)
 
 
-def _register_mock_tools(
-    mcp: Any,
-    artifact_store: ArtifactStore,
-    settings: Settings,
-) -> None:
+def _register_mock_tools(mcp: Any, artifact_store: ArtifactStore) -> None:
     state = {"power": False, "brightness": 50}
 
     @mcp.tool
-    def mock_get_state(
-        identifier: str = "dev_mock_light",
-    ) -> dict[str, Any]:
-        """Return deterministic state from the zero-I/O mock device."""
+    def mock_get_state(identifier: str = "dev_mock_light") -> dict[str, Any]:
         return {"identifier": identifier, **state}
 
     @mcp.tool
     def mock_set_power(identifier: str, power: bool) -> dict[str, Any]:
-        """Set power explicitly on the zero-I/O mock device."""
         state["power"] = power
         return {"identifier": identifier, **state}
 
@@ -233,15 +257,13 @@ def _register_mock_tools(
     def mock_capture_snapshot(
         identifier: str = "dev_mock_light",
     ) -> dict[str, Any]:
-        """Persist a deterministic mock image through the confined store."""
-        payload = b"\x89PNG\r\n\x1a\nmock-device-snapshot"
         context = current_context()
         if context is None or context.target is None:
             raise ArtifactError(
                 "artifact creation requires an authorized target context"
             )
         metadata = artifact_store.save(
-            payload,
+            b"\x89PNG\r\n\x1a\nmock-device-snapshot",
             "image/png",
             owner_subject=context.principal.subject,
             target_id=context.target.target_id,
@@ -261,38 +283,37 @@ def _register_mock_tools(
 def _register_artifact_resource(
     mcp: Any,
     artifact_store: ArtifactStore,
+    gate: OperationGate,
     settings: Settings,
 ) -> None:
-    @mcp.resource(
-        "artifact://{artifact_id}",
-        mime_type="application/octet-stream",
-    )
-    def read_artifact(artifact_id: str) -> bytes:
-        """Read one integrity-checked artifact by opaque ID."""
+    @mcp.resource("artifact://{artifact_id}", mime_type="application/octet-stream")
+    async def read_artifact(artifact_id: str) -> bytes:
         principal = _principal_from_fastmcp(settings)
-        if not (
-            {
-                "devices:sensitive",
-                "camera:snapshot:sensitive",
-                "devices:admin",
-            }
-            & principal.scopes
-        ):
-            raise ArtifactError(
-                "missing sensitive artifact-read authorization scope"
+
+        async def callback() -> bytes:
+            _metadata, content = artifact_store.read(
+                artifact_id,
+                requester_subject=principal.subject,
+                allow_admin="devices:admin" in principal.scopes,
             )
-        _metadata, content = artifact_store.read(
-            artifact_id,
-            requester_subject=principal.subject,
-            allow_admin="devices:admin" in principal.scopes,
-        )
-        return content
+            return content
+
+        try:
+            return await _invoke_public_component(
+                gate,
+                settings,
+                "artifact_read",
+                {"artifact_id": artifact_id},
+                principal,
+                callback,
+            )
+        except PublicInvocationError as exc:
+            raise ArtifactError(str(exc)) from exc
 
 
 def build_server(
     settings: Settings | None = None,
 ) -> tuple[Any, OperationGate]:
-    """Build a server without starting a transport or performing device I/O."""
     from fastmcp import FastMCP
     from starlette.responses import JSONResponse
 
@@ -300,18 +321,19 @@ def build_server(
     if settings.mock_mode:
         from .mock_runtime import MOCK_MANIFESTS
 
-        raw_catalog = MOCK_MANIFESTS
+        raw_tool_catalog = MOCK_MANIFESTS
         target_resolver = MockTargetResolver()
     else:
         from tools.constants import TOOL_MANIFESTS
 
-        raw_catalog = TOOL_MANIFESTS
+        raw_tool_catalog = TOOL_MANIFESTS
         target_resolver = LegacyTargetResolver(settings)
 
-    catalog = normalize_catalog(raw_catalog)
+    tool_catalog = normalize_catalog(raw_tool_catalog)
+    public_catalog = {**tool_catalog, "artifact_read": ARTIFACT_READ_MANIFEST}
     gate = OperationGate(
         settings,
-        catalog,
+        public_catalog,
         target_resolver=target_resolver,
     )
     artifact_store = ArtifactStore(
@@ -325,16 +347,17 @@ def build_server(
         version=package_version(),
         auth=_build_auth(settings),
     )
+
     if settings.mock_mode:
-        _register_mock_tools(mcp, artifact_store, settings)
+        _register_mock_tools(mcp, artifact_store)
     else:
         from .legacy_compat import install_legacy_safety
 
         install_legacy_safety(settings)
         _register_legacy_tools(mcp)
-    _register_artifact_resource(mcp, artifact_store, settings)
+    _register_artifact_resource(mcp, artifact_store, gate, settings)
 
-    for name, manifest in catalog.items():
+    for name, manifest in tool_catalog.items():
         if not is_runtime_active(manifest):
             mcp.disable(keys={f"tool:{name}"})
     _install_policy_middleware(mcp, gate, settings)
@@ -353,30 +376,35 @@ def build_server(
 
     @mcp.custom_route("/ready", methods=["GET"])
     async def ready(_request: Any) -> JSONResponse:
-        registered = set(await mcp.get_tools())
-        governed = set(catalog)
-        active = {
+        registered_tools = set(await mcp.get_tools())
+        active_tools = {
             name
-            for name, manifest in catalog.items()
+            for name, manifest in tool_catalog.items()
             if is_runtime_active(manifest)
         }
-        unexpected_registered = sorted(registered - governed)
-        missing_active = sorted(active - registered)
+        unexpected_tools = sorted(registered_tools - set(tool_catalog))
+        missing_tools = sorted(active_tools - registered_tools)
+
+        templates_getter = getattr(mcp, "get_resource_templates", None)
+        templates = await templates_getter() if callable(templates_getter) else {}
+        registered_templates = {str(key) for key in templates}
+        artifact_registered = any(
+            "artifact://" in item for item in registered_templates
+        )
+        resource_ok = artifact_registered and "artifact_read" in gate.catalog
         status = (
             "ready"
-            if not unexpected_registered and not missing_active
+            if not unexpected_tools and not missing_tools and resource_ok
             else "not-ready"
         )
         return JSONResponse(
             {
                 "status": status,
-                "registered": len(registered),
-                "governed": len(governed),
-                "unexpected_registered": unexpected_registered,
-                "missing_active": missing_active,
-                "inactive_or_optional": sorted(
-                    (governed - active) - registered
-                ),
+                "registered_tools": len(registered_tools),
+                "governed_components": len(gate.catalog),
+                "unexpected_registered_tools": unexpected_tools,
+                "missing_active_tools": missing_tools,
+                "artifact_resource_governed": resource_ok,
             },
             status_code=200 if status == "ready" else 503,
         )
@@ -404,7 +432,8 @@ def capability_document(settings: Settings | None = None) -> str:
         from .mock_runtime import MOCK_MANIFESTS as raw
     else:
         from tools.constants import TOOL_MANIFESTS as raw
-    catalog = normalize_catalog(raw)
+
+    catalog = {**normalize_catalog(raw), "artifact_read": ARTIFACT_READ_MANIFEST}
     return json.dumps(
         {
             "schema_version": MANIFEST_SCHEMA_VERSION,
