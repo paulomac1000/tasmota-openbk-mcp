@@ -29,13 +29,8 @@ class LegacyToolFailure(RuntimeError):
 
 
 class _ContextSlot:
-    """Compatibility slot backed by ContextVar instead of thread-local state."""
-
     def __init__(self) -> None:
-        self._value: ContextVar[str] = ContextVar(
-            "legacy_request_id",
-            default="-",
-        )
+        self._value: ContextVar[str] = ContextVar("legacy_request_id", default="-")
 
     @property
     def value(self) -> str:
@@ -47,7 +42,6 @@ class _ContextSlot:
 
 
 def normalize_legacy_result(value: Any) -> Any:
-    """Convert legacy JSON envelopes to typed results or protocol-visible failures."""
     if not isinstance(value, str):
         return value
     try:
@@ -74,7 +68,6 @@ def _bind_authorized_target(
     args: tuple[Any, ...],
     kwargs: dict[str, Any],
 ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-    """Replace a model selector with the address authorized by the gate."""
     from .policy import current_context
 
     context = current_context()
@@ -91,29 +84,16 @@ def _bind_authorized_target(
 
 def _wrap(function: Callable[..., Any]) -> Callable[..., Any]:
     if inspect.iscoroutinefunction(function):
-
         @functools.wraps(function)
         async def async_wrapper(*args: Any, **kwargs: Any) -> Any:
-            bound_args, bound_kwargs = _bind_authorized_target(
-                function,
-                args,
-                kwargs,
-            )
-            return normalize_legacy_result(
-                await function(*bound_args, **bound_kwargs)
-            )
-
+            bound_args, bound_kwargs = _bind_authorized_target(function, args, kwargs)
+            return normalize_legacy_result(await function(*bound_args, **bound_kwargs))
         return async_wrapper
 
     @functools.wraps(function)
     async def sync_wrapper(*args: Any, **kwargs: Any) -> Any:
         from .policy import current_context, register_backend_completion
-
-        bound_args, bound_kwargs = _bind_authorized_target(
-            function,
-            args,
-            kwargs,
-        )
+        bound_args, bound_kwargs = _bind_authorized_target(function, args, kwargs)
         call = functools.partial(function, *bound_args, **bound_kwargs)
         worker = asyncio.create_task(
             anyio.to_thread.run_sync(
@@ -127,19 +107,12 @@ def _wrap(function: Callable[..., Any]) -> Callable[..., Any]:
         try:
             value = await asyncio.shield(worker)
         except asyncio.CancelledError:
-            # The client response can now honor its deadline immediately.  The
-            # operation gate keeps the canonical concurrency permit until this
-            # registered worker really exits, so another mutation cannot race
-            # an ambiguous in-flight backend outcome.
             raise
         return normalize_legacy_result(value)
-
     return sync_wrapper
 
 
 class LegacyRegistrationProxy:
-    """Wrap callables before FastMCP registration."""
-
     def __init__(self, mcp: Any) -> None:
         self._mcp = mcp
 
@@ -160,12 +133,21 @@ class LegacyTargetResolver:
     @staticmethod
     def _devices() -> list[dict[str, Any]]:
         from tools.iot_discovery import _get_cached_devices
-
         return list(_get_cached_devices())
 
-    async def resolve(self, selector: str) -> BoundTarget:
+    async def resolve(
+        self,
+        selector: str,
+        *,
+        allowed_target_ids: frozenset[str] | None = None,
+    ) -> BoundTarget:
         devices = await asyncio.to_thread(self._devices)
-        return resolve_exact_target(selector, devices, self.settings)
+        return resolve_exact_target(
+            selector,
+            devices,
+            self.settings,
+            allowed_target_ids=allowed_target_ids,
+        )
 
     async def revalidate(self, target: BoundTarget) -> None:
         devices = await asyncio.to_thread(self._devices)
@@ -175,32 +157,20 @@ class LegacyTargetResolver:
             if str(record.get("ip", "")) == target.address
         ]
         if len(matches) != 1:
-            raise TargetNotFound(
-                "authorized target disappeared or became ambiguous"
-            )
+            raise TargetNotFound("authorized target disappeared or became ambiguous")
         revalidate_binding(target, matches[0], self.settings)
 
 
 def install_legacy_safety(settings: Settings) -> None:
-    """Harden legacy lookup and request context at the compatibility boundary."""
     import importlib
-
     from tools import iot_discovery
     from tools import constants as legacy_constants
 
-    if not isinstance(
-        getattr(legacy_constants, "_request_id_context", None),
-        _ContextSlot,
-    ):
+    if not isinstance(getattr(legacy_constants, "_request_id_context", None), _ContextSlot):
         legacy_constants._request_id_context = _ContextSlot()
 
     original_find = getattr(iot_discovery, "_find_device_by_identifier", None)
-    if not getattr(
-        original_find,
-        "__exact_target_wrapper__",
-        False,
-    ):
-
+    if not getattr(original_find, "__exact_target_wrapper__", False):
         def exact_find(selector: str) -> dict[str, Any] | None:
             devices = list(iot_discovery._get_cached_devices())
             normalized = normalize_selector(selector)
@@ -222,7 +192,6 @@ def install_legacy_safety(settings: Settings) -> None:
             address = str(matches[0].get("ip", ""))
             validate_address(address, settings)
             return matches[0]
-
         setattr(exact_find, "__exact_target_wrapper__", True)
         iot_discovery._find_device_by_identifier = exact_find
 
@@ -232,10 +201,8 @@ def install_legacy_safety(settings: Settings) -> None:
         "__exact_target_wrapper__",
         False,
     ):
-
         def exact_resolve(selector: str) -> str | None:
             from .policy import current_context
-
             context = current_context()
             if context is not None and context.target is not None:
                 target = context.target
@@ -248,11 +215,7 @@ def install_legacy_safety(settings: Settings) -> None:
                     }
                 except (TypeError, ValueError):
                     return None
-                return (
-                    target.address
-                    if normalized in authorized_selectors
-                    else None
-                )
+                return target.address if normalized in authorized_selectors else None
             try:
                 target = resolve_exact_target(
                     selector,
@@ -262,19 +225,14 @@ def install_legacy_safety(settings: Settings) -> None:
                 return target.address
             except TargetNotFound:
                 return None
-
         setattr(exact_resolve, "__exact_target_wrapper__", True)
         iot_discovery._resolve_ip = exact_resolve
 
     try:
         iot_control = importlib.import_module("tools.iot_control")
-        error_response = getattr(
-            legacy_constants,
-            "_error_response_extended",
-        )
+        error_response = getattr(legacy_constants, "_error_response_extended")
     except (ImportError, AttributeError):
         return
-
     original_power = getattr(iot_control, "_set_power", None)
     original_brightness = getattr(iot_control, "_set_brightness", None)
     if not callable(original_power) or not callable(original_brightness):
@@ -297,10 +255,7 @@ def install_legacy_safety(settings: Settings) -> None:
         if device_type == "tuya" and state.upper() == "TOGGLE":
             return error_response(
                 code="UNSUPPORTED_OPERATION",
-                message=(
-                    "Tuya TOGGLE is disabled because it is non-idempotent; "
-                    "use explicit ON or OFF."
-                ),
+                message="Tuya TOGGLE is disabled; use explicit ON or OFF.",
             )
         return original_power(identifier, state, channel, timeout_seconds)
 
@@ -317,22 +272,14 @@ def install_legacy_safety(settings: Settings) -> None:
             else None
         )
         if device_type != "tuya":
-            return original_brightness(
-                identifier,
-                brightness,
-                channel,
-                timeout_seconds,
-            )
+            return original_brightness(identifier, brightness, channel, timeout_seconds)
         from tools.iot_tuya import _find_tuya_in_cache, _tuya_set_value
-
         entry = _find_tuya_in_cache(identifier) or {}
         brightness_dp = entry.get("brightness_dp_id")
         if not brightness_dp:
             return error_response(
                 code="UNSUPPORTED_OPERATION",
-                message=(
-                    "Tuya brightness requires a reviewed brightness_dp_id mapping."
-                ),
+                message="Tuya brightness requires a reviewed brightness_dp_id mapping.",
             )
         return _tuya_set_value(identifier, str(brightness_dp), brightness)
 
