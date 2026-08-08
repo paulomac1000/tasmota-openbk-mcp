@@ -74,11 +74,29 @@ class MockTargetResolver:
 
     def __init__(self) -> None:
         self.device = deepcopy(MOCK_DEVICE)
+        self.resolve_calls = 0
         self.revalidations = 0
 
-    async def resolve(self, selector: str) -> BoundTarget:
+    async def resolve(
+        self,
+        selector: str,
+        *,
+        allowed_target_ids: frozenset[str] | None = None,
+    ) -> BoundTarget:
+        self.resolve_calls += 1
+        if (
+            allowed_target_ids is not None
+            and "dev_mock_light" not in allowed_target_ids
+        ):
+            raise TargetNotFound(
+                f"{selector!r}: no target in authorized namespace"
+            )
         normalized = selector.strip().casefold()
-        if normalized not in {"dev_mock_light", "mock light", "192.0.2.10"}:
+        if normalized not in {
+            "dev_mock_light",
+            "mock light",
+            "192.0.2.10",
+        }:
             raise TargetNotFound(f"{selector!r}: no exact mock target")
         return BoundTarget(
             target_id="dev_mock_light",
