@@ -68,6 +68,12 @@ target-version = "py313"
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
+[tool.ruff.lint.per-file-ignores]
+# The existing fail-closed translator still uses the tuple spelling in one
+# isinstance check. UP038 is cosmetic; keep the security-sensitive translator
+# byte-for-byte stable while the compliance work changes its consumers.
+"local_home_devices_mcp/manifests.py" = ["UP038"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true
