@@ -43,7 +43,12 @@ async def test_stdio_subprocess_full_lifecycle(tmp_path: Path):
             await session.initialize()
             tools = await session.list_tools()
             names = {tool.name for tool in tools.tools}
-            assert {"mock_get_state", "mock_set_power", "mock_capture_snapshot"} <= names
+            assert {
+                "mock_get_state",
+                "mock_set_power",
+                "mock_capture_snapshot",
+                "mock_wait",
+            } <= names
             result = await session.call_tool(
                 "mock_set_power", {"identifier": "dev_mock_light", "power": True}
             )
@@ -77,7 +82,15 @@ async def test_streamable_http_real_server_and_auth_boundaries(tmp_path: Path):
     port = _free_port()
     token = "r" * 32
     env = _env(tmp_path, transport="http")
-    env.update({"MCP_PORT": str(port), "MCP_AUTH_READ_TOKEN": token})
+    env.update(
+        {
+            "MCP_PORT": str(port),
+            "MCP_AUTH_READ_TOKEN": token,
+            "MCP_HTTP_DEVELOPMENT_MODE": "1",
+            "MCP_ALLOWED_ORIGINS": "https://client.example",
+            "MCP_HTTP_MAX_BODY_BYTES": "4096",
+        }
+    )
     process = subprocess.Popen(
         [sys.executable, str(ROOT / "server.py")],
         cwd=ROOT,
@@ -86,15 +99,21 @@ async def test_streamable_http_real_server_and_auth_boundaries(tmp_path: Path):
         stderr=subprocess.PIPE,
     )
     try:
-        _wait_http(f"http://127.0.0.1:{port}/health", process)
+        base_url = f"http://127.0.0.1:{port}"
+        _wait_http(f"{base_url}/health", process)
+
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
             async with streamable_http_client(
-                f"http://127.0.0.1:{port}/mcp", http_client=client
+                f"{base_url}/mcp", http_client=client
             ) as (read, write, _):
                 async with ClientSession(read, write) as session:
                     await session.initialize()
                     tools = await session.list_tools()
-                    assert "mock_get_state" in {tool.name for tool in tools.tools}
+                    names = {tool.name for tool in tools.tools}
+                    assert "mock_get_state" in names
+                    assert "mock_wait" in names
+                    assert "mock_set_power" not in names
+                    assert "mock_capture_snapshot" not in names
                     result = await session.call_tool(
                         "mock_get_state", {"identifier": "dev_mock_light"}
                     )
@@ -107,10 +126,33 @@ async def test_streamable_http_real_server_and_auth_boundaries(tmp_path: Path):
         async with httpx.AsyncClient(headers={"Authorization": "Bearer invalid"}) as bad_client:
             with pytest.raises(Exception):
                 async with streamable_http_client(
-                    f"http://127.0.0.1:{port}/mcp", http_client=bad_client
+                    f"{base_url}/mcp", http_client=bad_client
                 ) as (read, write, _):
                     async with ClientSession(read, write) as session:
                         await session.initialize()
+
+        bad_host = httpx.post(
+            f"{base_url}/mcp",
+            headers={"Host": "evil.example"},
+            content=b"{}",
+            timeout=2,
+        )
+        assert bad_host.status_code == 400
+
+        bad_origin = httpx.post(
+            f"{base_url}/mcp",
+            headers={"Origin": "https://evil.example"},
+            content=b"{}",
+            timeout=2,
+        )
+        assert bad_origin.status_code == 403
+
+        oversized = httpx.post(
+            f"{base_url}/mcp",
+            content=b"x" * 4097,
+            timeout=2,
+        )
+        assert oversized.status_code == 413
     finally:
         process.terminate()
         try:
