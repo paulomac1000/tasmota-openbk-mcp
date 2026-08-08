@@ -11,21 +11,34 @@ from typing import Any, Awaitable, Callable, Mapping, TypeVar
 
 from .artifacts import ArtifactError, ArtifactStore
 from .config import Settings, load_settings
-from .legacy_compat import LegacyRegistrationProxy, LegacyTargetResolver, LegacyToolFailure
+from .http_boundary import HttpBoundaryMiddleware, set_wire_response_limit
+from .legacy_compat import (
+    LegacyRegistrationProxy,
+    LegacyTargetResolver,
+    LegacyToolFailure,
+)
 from .manifests import (
-    ARTIFACT_READ_MANIFEST,
     MANIFEST_SCHEMA_VERSION,
     SERVER_HARD_MAX_RESPONSE_BYTES,
     ManifestError,
     is_runtime_active,
     manifest_timeout_seconds,
-    normalize_catalog,
+)
+from .public_catalog import (
+    PUBLIC_RESOURCE_COMPONENTS,
+    build_public_catalog,
+    component_kind,
 )
 from .mock_runtime import MockTargetResolver
 from .policy import OperationGate, PolicyError, Principal, current_context
 from .targeting import TargetError
 
 T = TypeVar("T")
+SUPPORTED_PROTOCOL_REVISIONS = ["2025-11-25"]
+ADOPTION_PROFILES = [
+    "mcp-server-architect@1.2.0",
+    "python-fastmcp-package@1.2.0",
+]
 
 
 class PublicInvocationError(RuntimeError):
@@ -40,9 +53,25 @@ def package_version() -> str:
 
 
 def _build_auth(settings: Settings) -> Any | None:
+    if settings.transport == "stdio":
+        return None
+    if settings.has_jwt_auth:
+        from fastmcp.server.auth.providers.jwt import JWTVerifier
+
+        assert settings.jwt_jwks_uri is not None
+        assert settings.jwt_issuer is not None
+        assert settings.jwt_audience is not None
+        return JWTVerifier(
+            jwks_uri=settings.jwt_jwks_uri,
+            issuer=settings.jwt_issuer,
+            audience=settings.jwt_audience,
+            required_scopes=[],
+            ssrf_safe=True,
+        )
+
     tokens = settings.static_tokens()
     if not tokens:
-        return None
+        raise ValueError("HTTP authentication provider is not configured")
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 
     return StaticTokenVerifier(tokens=tokens, required_scopes=[])
@@ -65,11 +94,7 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
                 frozenset({"devices:admin"}),
                 "stdio",
             )
-        return Principal(
-            "anonymous-loopback-http",
-            frozenset({"devices:read"}),
-            "http",
-        )
+        raise PolicyError("HTTP authentication is required")
 
     claims = getattr(token, "claims", None) or {}
     subject = str(
@@ -89,6 +114,48 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
     else:
         target_ids = frozenset(str(item) for item in raw_targets)
     return Principal(subject, scopes, "http", target_ids)
+
+
+def _component_manifest_name(component: Any, gate: OperationGate) -> str | None:
+    """Map a FastMCP public component to the application-owned manifest identity."""
+    name = getattr(component, "name", None)
+    if isinstance(name, str) and name in gate.catalog:
+        return name
+    if name == "read_artifact" and "artifact_read" in gate.catalog:
+        return "artifact_read"
+
+    for attribute in ("uri", "uri_template"):
+        value = getattr(component, attribute, None)
+        if value is None:
+            continue
+        identity = str(value)
+        mapped = PUBLIC_RESOURCE_COMPONENTS.get(identity)
+        if mapped is not None and mapped in gate.catalog:
+            return mapped
+    return None
+
+
+def _manifest_authorization_check(gate: OperationGate) -> Callable[[Any], bool]:
+    """Filter discovery and direct access using canonical manifest scopes."""
+
+    def authorize(context: Any) -> bool:
+        token = getattr(context, "token", None)
+        component = getattr(context, "component", None)
+        if token is None or component is None:
+            return False
+        manifest_name = _component_manifest_name(component, gate)
+        if manifest_name is None:
+            return False
+        manifest = gate.manifest(manifest_name)
+        if not is_runtime_active(manifest):
+            return False
+        scopes = {str(item) for item in (getattr(token, "scopes", None) or [])}
+        if "devices:admin" in scopes:
+            return True
+        required = {str(item) for item in manifest["authorization_scopes"]}
+        return required.issubset(scopes)
+
+    return authorize
 
 
 def _jsonable(value: Any) -> Any:
@@ -142,6 +209,8 @@ async def _invoke_public_component(
 ) -> T:
     """Run every public MCP component through the same governance kernel."""
     manifest = gate.manifest(capability_name)
+    maximum = effective_response_limit(manifest, settings)
+    set_wire_response_limit(maximum)
     deadline = time.monotonic() + manifest_timeout_seconds(manifest)
     try:
         async with gate.guard_async(
@@ -151,7 +220,8 @@ async def _invoke_public_component(
             deadline=deadline,
         ):
             result = await callback()
-            maximum = effective_response_limit(manifest, settings)
+            # This catches oversized application values before adapter serialization.
+            # HttpBoundaryMiddleware independently enforces the actual final ASGI body.
             if encoded_response_bytes(result) > maximum:
                 raise PublicInvocationError(
                     f"final response exceeds {maximum} bytes"
@@ -188,8 +258,12 @@ def _install_policy_middleware(
     settings: Settings,
 ) -> None:
     from fastmcp.exceptions import ToolError
-    from fastmcp.server.middleware import Middleware
+    from fastmcp.server.middleware import AuthMiddleware, Middleware
     from tools.validators import ValidationError
+
+    # FastMCP's AuthMiddleware filters list responses and independently rejects
+    # unauthorized direct execution. It is skipped by FastMCP for stdio.
+    mcp.add_middleware(AuthMiddleware(auth=_manifest_authorization_check(gate)))
 
     class InvocationPolicyMiddleware(Middleware):
         async def on_call_tool(self, context: Any, call_next: Any) -> Any:
@@ -254,6 +328,18 @@ def _register_mock_tools(mcp: Any, artifact_store: ArtifactStore) -> None:
         return {"identifier": identifier, **state}
 
     @mcp.tool
+    async def mock_wait(
+        identifier: str = "dev_mock_light",
+        delay_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        import asyncio
+
+        if delay_seconds < 0 or delay_seconds > 5:
+            raise ValueError("delay_seconds must be between 0 and 5")
+        await asyncio.sleep(delay_seconds)
+        return {"identifier": identifier, "waited_seconds": delay_seconds}
+
+    @mcp.tool
     def mock_capture_snapshot(
         identifier: str = "dev_mock_light",
     ) -> dict[str, Any]:
@@ -286,7 +372,10 @@ def _register_artifact_resource(
     gate: OperationGate,
     settings: Settings,
 ) -> None:
-    @mcp.resource("artifact://{artifact_id}", mime_type="application/octet-stream")
+    @mcp.resource(
+        "artifact://{artifact_id}",
+        mime_type="application/octet-stream",
+    )
     async def read_artifact(artifact_id: str) -> bytes:
         principal = _principal_from_fastmcp(settings)
 
@@ -329,8 +418,12 @@ def build_server(
         raw_tool_catalog = TOOL_MANIFESTS
         target_resolver = LegacyTargetResolver(settings)
 
-    tool_catalog = normalize_catalog(raw_tool_catalog)
-    public_catalog = {**tool_catalog, "artifact_read": ARTIFACT_READ_MANIFEST}
+    public_catalog = build_public_catalog(raw_tool_catalog)
+    tool_catalog = {
+        name: manifest
+        for name, manifest in public_catalog.items()
+        if component_kind(manifest) == "tool"
+    }
     gate = OperationGate(
         settings,
         public_catalog,
@@ -346,6 +439,8 @@ def build_server(
         name="Local Home Devices",
         version=package_version(),
         auth=_build_auth(settings),
+        stateless_http=True,
+        json_response=True,
     )
 
     if settings.mock_mode:
@@ -370,6 +465,7 @@ def build_server(
                 "service": "local-home-devices-mcp",
                 "version": package_version(),
                 "transport": settings.transport,
+                "auth_profile": settings.auth_profile,
                 "mock_mode": settings.mock_mode,
             }
         )
@@ -418,11 +514,20 @@ def run(settings: Settings | None = None) -> None:
     if settings.transport == "stdio":
         mcp.run(transport="stdio")
         return
-    mcp.run(
-        transport="http",
+
+    import uvicorn
+
+    app = HttpBoundaryMiddleware(
+        mcp.http_app(path=settings.mcp_path),
+        settings,
+    )
+    uvicorn.run(
+        app,
         host=settings.bind_host,
         port=settings.port,
-        path=settings.mcp_path,
+        limit_concurrency=settings.http_max_connections,
+        backlog=max(1, settings.http_queue_limit),
+        h11_max_incomplete_event_size=settings.http_max_header_bytes,
     )
 
 
@@ -433,15 +538,22 @@ def capability_document(settings: Settings | None = None) -> str:
     else:
         from tools.constants import TOOL_MANIFESTS as raw
 
-    catalog = {**normalize_catalog(raw), "artifact_read": ARTIFACT_READ_MANIFEST}
+    catalog = build_public_catalog(raw)
     return json.dumps(
         {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "server_version": package_version(),
             "sdk_family": "fastmcp",
             "sdk_version": "3.4.6",
+            "profiles": ADOPTION_PROFILES,
+            "protocol_revisions": SUPPORTED_PROTOCOL_REVISIONS,
             "supported_transports": ["stdio", "streamable-http"],
             "active_transport": settings.transport,
+            "auth_profile": settings.auth_profile,
+            "supported_count": len(catalog),
+            "active_count": sum(
+                1 for manifest in catalog.values() if is_runtime_active(manifest)
+            ),
             "active_capability_ids": sorted(
                 name
                 for name, manifest in catalog.items()
