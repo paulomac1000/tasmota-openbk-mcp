@@ -1,33 +1,36 @@
 #!/usr/bin/env python3
-"""Export canonical active capability manifests for exact-schema validation."""
+"""Export the complete canonical capability catalog for schema validation."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
-from local_home_devices_mcp.manifests import is_runtime_active, normalize_catalog
+from local_home_devices_mcp.manifests import ARTIFACT_READ_MANIFEST, normalize_catalog
 
 
-def _catalog(mock: bool):
+def _catalog(mock: bool) -> dict[str, dict[str, Any]]:
     if mock:
         from local_home_devices_mcp.mock_runtime import MOCK_MANIFESTS
 
-        return normalize_catalog(MOCK_MANIFESTS)
-    from tools.constants import TOOL_MANIFESTS
+        catalog = normalize_catalog(MOCK_MANIFESTS)
+    else:
+        from tools.constants import TOOL_MANIFESTS
 
-    return normalize_catalog(TOOL_MANIFESTS)
+        catalog = normalize_catalog(TOOL_MANIFESTS)
+    catalog["artifact_read"] = dict(ARTIFACT_READ_MANIFEST)
+    return catalog
 
 
 def export(output: Path, *, mock: bool) -> list[Path]:
+    """Export every supported canonical manifest, including inactive entries."""
     output.mkdir(parents=True, exist_ok=True)
     if output.is_symlink():
         raise ValueError("output directory must not be a symlink")
     paths: list[Path] = []
     for capability_id, manifest in sorted(_catalog(mock).items()):
-        if not is_runtime_active(manifest):
-            continue
         path = output / f"{capability_id}.json"
         path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
@@ -35,7 +38,7 @@ def export(output: Path, *, mock: bool) -> list[Path]:
         )
         paths.append(path)
     if not paths:
-        raise RuntimeError("no active canonical capability manifests were exported")
+        raise RuntimeError("no canonical capability manifests were exported")
     return paths
 
 
