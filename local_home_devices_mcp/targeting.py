@@ -38,7 +38,12 @@ class BoundTarget:
 
 
 class TargetResolver(Protocol):
-    async def resolve(self, selector: str) -> BoundTarget: ...
+    async def resolve(
+        self,
+        selector: str,
+        *,
+        allowed_target_ids: frozenset[str] | None = None,
+    ) -> BoundTarget: ...
 
     async def revalidate(self, target: BoundTarget) -> None: ...
 
@@ -52,7 +57,9 @@ def _normalized_identity_parts(device: Mapping[str, Any]) -> list[str]:
         if key == "mac":
             compact = re.sub(r"[^0-9A-Fa-f]", "", value).lower()
             if len(compact) != 12:
-                raise TargetError("device MAC address is not a stable 48-bit identifier")
+                raise TargetError(
+                    "device MAC address is not a stable 48-bit identifier"
+                )
             value = compact
         else:
             value = value.casefold()
@@ -80,9 +87,13 @@ def validate_address(address: str, settings: Settings) -> str:
     if not isinstance(parsed, ipaddress.IPv4Address):
         raise TargetError("only IPv4 device targets are supported")
     if parsed.is_multicast or parsed.is_unspecified or parsed.is_loopback:
-        raise TargetNotAuthorized(f"target address {parsed} is not a device address")
+        raise TargetNotAuthorized(
+            f"target address {parsed} is not a device address"
+        )
     if not any(parsed in network for network in settings.allowed_networks):
-        raise TargetNotAuthorized(f"target address {parsed} is outside allowed networks")
+        raise TargetNotAuthorized(
+            f"target address {parsed} is outside allowed networks"
+        )
     return str(parsed)
 
 
@@ -99,14 +110,26 @@ def normalize_selector(selector: str) -> str:
 
 
 def resolve_exact_target(
-    selector: str, devices: Iterable[Mapping[str, Any]], settings: Settings
+    selector: str,
+    devices: Iterable[Mapping[str, Any]],
+    settings: Settings,
+    *,
+    allowed_target_ids: frozenset[str] | None = None,
 ) -> BoundTarget:
     normalized = normalize_selector(selector)
     records = list(devices)
+    if allowed_target_ids is not None:
+        records = [
+            record
+            for record in records
+            if target_id_for(record) in allowed_target_ids
+        ]
+
     try:
         parsed_selector = ipaddress.ip_address(normalized)
     except ValueError:
         parsed_selector = None
+
     if parsed_selector is not None:
         if not settings.allow_direct_ip_targets:
             raise TargetNotFound(f"{selector!r}: direct IP targets are disabled")
@@ -117,16 +140,19 @@ def resolve_exact_target(
         ]
     else:
         matches = [
-            d
-            for d in records
+            device
+            for device in records
             if normalized
             in {
-                str(d.get("target_id", "")).strip().casefold(),
-                str(d.get("name", "")).strip().casefold(),
+                str(device.get("target_id", "")).strip().casefold(),
+                str(device.get("name", "")).strip().casefold(),
             }
         ]
+
     if not matches:
-        if parsed_selector is not None and not settings.allow_direct_ip_targets:
+        if allowed_target_ids is not None:
+            reason = "no exact target match in authorized namespace"
+        elif parsed_selector is not None and not settings.allow_direct_ip_targets:
             reason = "direct IP targets are disabled"
         elif parsed_selector is not None:
             reason = "address is not bound to a discovered stable target"
@@ -135,6 +161,7 @@ def resolve_exact_target(
         raise TargetNotFound(f"{selector!r}: {reason}")
     if len(matches) > 1:
         raise AmbiguousTarget(f"{selector!r} matched {len(matches)} devices")
+
     device = matches[0]
     address = validate_address(str(device.get("ip", "")), settings)
     return BoundTarget(
@@ -145,9 +172,16 @@ def resolve_exact_target(
     )
 
 
-def revalidate_binding(bound: BoundTarget, current: Mapping[str, Any], settings: Settings) -> None:
+def revalidate_binding(
+    bound: BoundTarget,
+    current: Mapping[str, Any],
+    settings: Settings,
+) -> None:
     address = validate_address(str(current.get("ip", "")), settings)
     if address != bound.address:
         raise TargetNotAuthorized("target address changed after authorization")
-    if target_id_for(current) != bound.target_id or _fingerprint(current) != bound.fingerprint:
+    if (
+        target_id_for(current) != bound.target_id
+        or _fingerprint(current) != bound.fingerprint
+    ):
         raise TargetNotAuthorized("target identity changed after authorization")
