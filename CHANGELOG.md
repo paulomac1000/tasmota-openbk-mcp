@@ -3,7 +3,7 @@
 ## [1.7.0] — 2026-08-09
 
 ### Added
-- **ai-skills compliance migration completed and verified against real hardware.** This branch adopts the `mcp-server-architect` 1.2.0 contract from the `ai-skills` `fix/unified-contract-release-hardening` revision and is now tested end-to-end: full local gate (865 tests), exact-wheel install, real stdio and Streamable HTTP probes, a locally built Docker image, and a live deployment in the `ha-mcp-stack` replacing the previous v1.6.0 container.
+- **ai-skills compliance migration completed and verified against real hardware.** This branch adopts the `mcp-server-architect` 1.2.0 contract from the `ai-skills` `fix/unified-contract-release-hardening` revision and is now tested end-to-end: full local gate (865 tests), exact-wheel install, real stdio and Streamable HTTP probes, a locally built Docker image, and a live deployment in the `ha-mcp-stack` replacing the previous v1.6.0 container. **Hosted CI is fully green** (quality, test, exact-wheel, and container jobs) on the exact pushed revision.
 
 ### Fixed
 - **FastMCP 3.4.6 API migration**: `stateless_http`/`json_response` moved from the `FastMCP()` constructor to `http_app()`; the `/ready` probe now uses `list_tools(run_middleware=False)` and `list_resource_templates(run_middleware=False)`; `mcp.get_tools()` replaced with the 3.4.6 `list_tools()` API.
@@ -16,6 +16,7 @@
 - **Test isolation**: removed the stale fastmcp MagicMock injection in `tests/unit/conftest.py` (fastmcp 2.x-era hack that poisoned in-memory fastmcp tests), restored `_find_device_by_identifier` after `install_legacy_safety` in compliance tests, and prevented the container-only `IOT_DATA_PATH=/app` value from leaking into local test runs.
 - **Stale tests aligned with the migrated implementation**: `test_mock_runtime` (new `run_mock_self_test` contract), `test_fastmcp_protocol`/`test_server_api` (real stdio subprocess instead of in-memory `Client(mcp)`), `test_real_transports` (corrected exception assertion + generous startup wait), `test_registration_coverage` (Docker-gated subset), `test_real_tools` (accepts OpenBK devices, which dominate this network), `test_policy`/`test_canonical_contract` (reviewed manifest classification), `test_release_and_image_contract` (new Dockerfile layout).
 - **Quality gates**: full `ruff check .` and `ruff format` clean (256 errors fixed), `mypy local_home_devices_mcp` clean (66 errors fixed; documented per-module overrides for the stub-less tinytuya/defusedxml/paho adapters), `compileall` clean, `bandit -r local_home_devices_mcp tools -ll` reports no Medium/High issues.
+- **Hosted CI compliance gates**: added `types-requests`/`types-defusedxml` to dev extras (mypy failed in CI without them), export only runtime-active manifests for the ai-skills capability-manifest validator, `status: accepted` → `active` in decision 0002 for the AFDS validator, added the required `concurrency` mapping to `auto-tag.yml`, and audit AGENTS instructions on a clean staging copy so the vendored `.standards` checkout no longer trips the single-layout mcp-server profile.
 
 ### Changed
 - `pyproject.toml` version pinned to `1.7.0` (was `2.0.0` on this branch).
