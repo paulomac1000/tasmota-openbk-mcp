@@ -2,7 +2,7 @@
 description: Record the decision to bind authorization and concurrency to stable target identity.
 doc_id: decision.runtime-target-binding
 type: decision
-status: accepted
+status: active
 rigor: operational
 owners: [repository-maintainers]
 verification: Run alias-concurrency, exact-resolution, identity-change, and migrated set-power tests.

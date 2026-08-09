@@ -11,6 +11,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: validate-release-request
+  cancel-in-progress: false
+
 jobs:
   validate:
     runs-on: ubuntu-24.04
