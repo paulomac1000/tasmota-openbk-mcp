@@ -1,0 +1,12 @@
+.git
+.github
+.venv
+__pycache__
+.pytest_cache
+.coverage
+coverage.xml
+build
+*.egg-info
+data
+# dist/, requirements.lock, and wheelhouse/ are exact-artifact inputs the
+# Dockerfile copies verbatim; they must remain in the build context.

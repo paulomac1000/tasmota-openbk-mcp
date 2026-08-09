@@ -29,8 +29,8 @@ FAKE_MOTION_XML = (
     "<enabled>true</enabled>"
     "<regionType>grid</regionType>"
     "<Grid>"
-    "<rowGranularity>18x18</rowGranularity>"
-    "<columnGranularity>22x22</columnGranularity>"
+    "<rowGranularity>18</rowGranularity>"
+    "<columnGranularity>22</columnGranularity>"
     "</Grid>"
     "<MotionDetectionLayout>"
     "<sensitivityLevel>70</sensitivityLevel>"
@@ -932,7 +932,7 @@ class TestHikvisionISAPIClientDeep:
         ):
             try:
                 create_isapi_client()
-                assert False, "Should raise ValueError"
+                raise AssertionError("Should raise ValueError")
             except ValueError as exc:
                 assert "HIKVISION_DOORBELL_USER" in str(exc)
 

@@ -16,6 +16,11 @@ for env_path in env_paths:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, value = line.split("=", 1)
+                        # IOT_DATA_PATH is a container deployment setting
+                        # provided by docker-compose; the container-only /app
+                        # path must not leak into local test runs.
+                        if key.strip() == "IOT_DATA_PATH":
+                            continue
                         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
         except Exception:
             pass
@@ -43,49 +48,42 @@ def _run_async(func, *args, **kwargs):
             return ex.submit(asyncio.run, func(*args, **kwargs)).result()
 
 
+class RegistryMCP:
+    """Minimal public registration surface for adapter integration tests."""
+
+    def __init__(self):
+        self.tools = {}
+
+    def tool(self, *args, **kwargs):
+        def register(function):
+            self.tools[kwargs.get("name", function.__name__)] = function
+            return function
+
+        if len(args) == 1 and callable(args[0]) and not kwargs:
+            return register(args[0])
+        return register
+
+
 class MCPWrapper:
-    """Simple wrapper to call tools on a FastMCP instance."""
+    """Call functions through the same public registry used during registration."""
 
     def __init__(self, mcp):
         self._mcp = mcp
 
     def call_tool(self, tool_name, **kwargs):
-        """Look up and execute a registered tool by name."""
-        # FastMCP 3.x: get_tool is async, tool_manager._tools removed
-        if hasattr(self._mcp, "_tool_manager") and hasattr(self._mcp._tool_manager, "_tools"):
-            tools = self._mcp._tool_manager._tools
-            tool = tools.get(tool_name)
-        elif hasattr(self._mcp, "_tools"):
-            tool = self._mcp._tools.get(tool_name)
-        else:
-            # FastMCP 3.x: use async get_tool
-            try:
-                tool = asyncio.run(self._mcp.get_tool(tool_name))
-            except Exception:
-                tool = None
-
-        if tool is None:
-            # Get available tools for error message
-            try:
-                all_tools = asyncio.run(self._mcp.list_tools())
-                available = [t.name for t in all_tools]
-            except Exception:
-                available = []
-            raise ValueError(f"Tool '{tool_name}' not found among {available}")
-
-        # FastMCP 3.x tool functions may have a different wrapper
-        fn = getattr(tool, "fn", tool) if not isinstance(tool, dict) else tool
-        if inspect.iscoroutinefunction(fn):
-            return _run_async(fn, **kwargs)
-        return fn(**kwargs)
+        try:
+            function = self._mcp.tools[tool_name]
+        except KeyError as exc:
+            raise ValueError(f"Tool {tool_name!r} not found") from exc
+        if inspect.iscoroutinefunction(function):
+            return _run_async(function, **kwargs)
+        return function(**kwargs)
 
 
 @pytest.fixture(scope="session")
 def mcp_client():
-    """Create real MCP server and return a call_tool wrapper."""
+    """Register real adapter wrappers without relying on FastMCP private state."""
     from unittest.mock import patch
-
-    from fastmcp import FastMCP
 
     from tools.iot_config import register_iot_config_tools
     from tools.iot_control import register_iot_control_tools
@@ -96,21 +94,17 @@ def mcp_client():
     from tools.iot_openhasp import register_openhasp_tools
     from tools.iot_tuya import register_iot_tuya_tools
 
-    # Write-tool error-path tests need the guard enabled so calls reach
-    # the tool logic (name resolution, validation) and not the gate.
     with patch("tools.constants.ENABLE_WRITE_OPERATIONS", True):
-        mcp = FastMCP("IoT-Integration-Test")
-
-        register_iot_config_tools(mcp)
-        register_iot_device_tools(mcp)
-        register_iot_discovery_tools(mcp)
-        register_iot_control_tools(mcp)
-        register_iot_mqtt_tools(mcp)
-        register_iot_tuya_tools(mcp)
-        register_openhasp_tools(mcp)
-        register_hikvision_tools(mcp)
-
-        yield MCPWrapper(mcp)
+        registry = RegistryMCP()
+        register_iot_config_tools(registry)
+        register_iot_device_tools(registry)
+        register_iot_discovery_tools(registry)
+        register_iot_control_tools(registry)
+        register_iot_mqtt_tools(registry)
+        register_iot_tuya_tools(registry)
+        register_openhasp_tools(registry)
+        register_hikvision_tools(registry)
+        yield MCPWrapper(registry)
 
 
 @pytest.fixture(scope="module")

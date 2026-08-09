@@ -1,5 +1,8 @@
 """Input validation for MCP IoT tools."""
 
+from __future__ import annotations
+
+import ipaddress
 import json
 import re
 from urllib.parse import urlparse
@@ -10,148 +13,87 @@ class ValidationError(Exception):
 
 
 def validate_required_string(value: str | None, name: str) -> str:
-    """Validate that a required string parameter is non-empty.
-
-    Args:
-        value: The string value to validate.
-        name: Parameter name for error messages.
-
-    Returns:
-        The stripped string.
-
-    Raises:
-        ValidationError: If value is None, empty, or whitespace-only.
-    """
     if not value or not value.strip():
         raise ValidationError(f"{name} is required and must not be empty")
     return value.strip()
 
 
 def validate_power_state(state: str) -> str:
-    """Validate that a power state is ON, OFF, or TOGGLE.
-
-    Args:
-        state: Power state string to validate.
-
-    Returns:
-        Uppercase, trimmed state string.
-
-    Raises:
-        ValidationError: If state is not a valid power state.
-    """
-    s = state.upper().strip()
-    if s not in ("ON", "OFF", "TOGGLE"):
+    value = state.upper().strip()
+    if value not in {"ON", "OFF", "TOGGLE"}:
         raise ValidationError(f"Invalid state '{state}'. Must be ON, OFF, or TOGGLE")
-    return s
+    return value
 
 
 def validate_brightness(value: int) -> int:
-    """Validate that a brightness value is within 0-100 range.
-
-    Args:
-        value: Brightness value to validate.
-
-    Returns:
-        The validated brightness value.
-
-    Raises:
-        ValidationError: If value is outside 0-100.
-    """
-    if not 0 <= value <= 100:
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
         raise ValidationError(f"Brightness must be 0-100, got {value}")
     return value
 
 
 def validate_channel(channel: int) -> int:
-    """Validate that a channel number is 1 or higher.
-
-    Args:
-        channel: Channel number to validate.
-
-    Returns:
-        The validated channel number.
-
-    Raises:
-        ValidationError: If channel is less than 1.
-    """
-    if channel < 1:
+    if isinstance(channel, bool) or not isinstance(channel, int) or channel < 1:
         raise ValidationError(f"Channel must be >= 1, got {channel}")
     return channel
 
 
 def validate_ip_format(ip: str) -> str:
-    """Validate that a string is a valid IPv4 address format.
-
-    Args:
-        ip: IP address string to validate.
-
-    Returns:
-        The trimmed IP address string.
-
-    Raises:
-        ValidationError: If the string does not match IPv4 format.
-    """
-    if not re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", ip.strip()):
-        raise ValidationError(f"Invalid IP address format: {ip}")
-    return ip.strip()
-
-
-_CIDR_RE = re.compile(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/(\d{1,2})$")
+    try:
+        parsed = ipaddress.ip_address(ip.strip())
+    except ValueError as exc:
+        raise ValidationError(f"Invalid IP address format: {ip}") from exc
+    if not isinstance(parsed, ipaddress.IPv4Address):
+        raise ValidationError("Only IPv4 addresses are supported")
+    return str(parsed)
 
 
 def validate_cidr(cidr: str | None) -> str:
-    """Validate a CIDR notation network range.
-
-    Args:
-        cidr: CIDR string (e.g. "192.168.1.0/24") or None.
-
-    Returns:
-        The trimmed CIDR string.
-
-    Raises:
-        ValidationError: If CIDR is None, empty, or does not match valid format.
-    """
-    if not cidr or not cidr.strip():
-        raise ValidationError("Network range is required")
-    cidr = cidr.strip()
-    m = _CIDR_RE.match(cidr)
-    if not m:
-        raise ValidationError(f"Invalid CIDR notation: {cidr!r}. Expected format: 192.168.1.0/24")
-    prefix = int(m.group(1))
-    if not 0 <= prefix <= 32:
-        raise ValidationError(f"Invalid CIDR prefix length: {prefix}. Must be 0-32")
-    octets = cidr.split("/")[0].split(".")
-    for octet in octets:
-        if not 0 <= int(octet) <= 255:
-            raise ValidationError(f"Invalid IP octet in CIDR: {cidr!r}. Each octet must be 0-255")
-    return cidr
+    value = validate_required_string(cidr, "network_range")
+    try:
+        network = ipaddress.ip_network(value, strict=False)
+    except ValueError as exc:
+        raise ValidationError(f"Invalid CIDR notation: {value!r}") from exc
+    if not isinstance(network, ipaddress.IPv4Network):
+        raise ValidationError("Only IPv4 CIDR ranges are supported")
+    min_prefix = int(__import__("os").getenv("MCP_MIN_SCAN_PREFIX", "24"))
+    if network.prefixlen < min_prefix:
+        raise ValidationError(
+            f"Network range {network} is too broad; minimum prefix is /{min_prefix}"
+        )
+    if not network.is_private:
+        raise ValidationError("Network scanning is restricted to private ranges")
+    return str(network)
 
 
 _NAME_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+$")
-
 _OPENHASP_TELNET_ALLOWLIST = [
     re.compile(r"^backlight(?:\s+(?:on|off|[0-9]{1,3}))?$"),
     re.compile(r"^idle\s+off$"),
     re.compile(r"^page\s+(?:[1-9]|1[0-2])$"),
     re.compile(r"^statusupdate$"),
 ]
+_GPIO_ROLES = {
+    "Relay",
+    "Relay_n",
+    "LED",
+    "LED_n",
+    "Btn",
+    "Btn_n",
+    "PWM",
+    "WifiLED",
+    "WifiLED_n",
+    "None",
+}
 
 
 def validate_openhasp_telnet_command(command: str | None) -> str:
-    """Validate a raw OpenHASP Telnet command against a strict allowlist.
-
-    Args:
-        command: Raw Telnet command from the tool caller.
-
-    Returns:
-        The trimmed command.
-
-    Raises:
-        ValidationError: If the command is empty or not explicitly allowed.
-    """
-    command = validate_required_string(command, "command")
-    if any(pattern.fullmatch(command) for pattern in _OPENHASP_TELNET_ALLOWLIST):
-        return command
+    value = validate_required_string(command, "command")
+    if any(pattern.fullmatch(value) for pattern in _OPENHASP_TELNET_ALLOWLIST):
+        if value.startswith("backlight "):
+            part = value.split()[1]
+            if part.isdigit() and int(part) > 255:
+                raise ValidationError("backlight brightness must be 0-255")
+        return value
     raise ValidationError(
         "Command is not allowed. Use one of: backlight, backlight on/off/0-255, "
         "idle off, page 1-12, statusupdate."
@@ -159,168 +101,87 @@ def validate_openhasp_telnet_command(command: str | None) -> str:
 
 
 def validate_json_object(text: str | None, name: str) -> str:
-    """Validate that a string contains a JSON object.
-
-    Args:
-        text: JSON text to validate.
-        name: Parameter name for error messages.
-
-    Returns:
-        The original text if valid.
-
-    Raises:
-        ValidationError: If the text is empty, invalid JSON, or not an object.
-    """
-    text = validate_required_string(text, name)
+    value = validate_required_string(text, name)
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(value)
     except json.JSONDecodeError as exc:
         raise ValidationError(f"{name} must be valid JSON") from exc
     if not isinstance(parsed, dict):
         raise ValidationError(f"{name} must be a JSON object")
-    return text
+    return value
 
 
 def validate_http_url(value: str | None, name: str) -> str:
-    """Validate that a string is an HTTP or HTTPS URL.
-
-    Args:
-        value: URL string to validate.
-        name: Parameter name for error messages.
-
-    Returns:
-        The trimmed URL.
-
-    Raises:
-        ValidationError: If the URL is empty or not HTTP(S).
-    """
     value = validate_required_string(value, name)
     parsed = urlparse(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
         raise ValidationError(f"{name} must be an HTTP or HTTPS URL")
+    if parsed.username or parsed.password or parsed.fragment:
+        raise ValidationError(f"{name} must not contain credentials or a fragment")
+    try:
+        host = ipaddress.ip_address(parsed.hostname)
+    except ValueError:
+        if not __import__("os").getenv("MCP_ALLOWED_FIRMWARE_HOSTS"):
+            raise ValidationError(
+                f"{name} hostname must be allowlisted in MCP_ALLOWED_FIRMWARE_HOSTS"
+            ) from None
+        allowed = {
+            item.strip().casefold()
+            for item in __import__("os").getenv("MCP_ALLOWED_FIRMWARE_HOSTS", "").split(",")
+            if item.strip()
+        }
+        if parsed.hostname.casefold() not in allowed:
+            raise ValidationError(f"{name} hostname is not allowlisted") from None
+    else:
+        if not host.is_private:
+            raise ValidationError(f"{name} IP must be private or explicitly proxied")
     return value
 
 
 def validate_flags_value(flags: int) -> int:
-    """Validate that a flags bitfield value is a non-negative integer within 64-bit range.
-
-    Args:
-        flags: Flags bitfield value to validate.
-
-    Returns:
-        The validated flags value.
-
-    Raises:
-        ValidationError: If value is not a non-negative integer or exceeds 2^64.
-    """
     if not isinstance(flags, int) or isinstance(flags, bool):
         raise ValidationError(f"Flags must be an integer, got {type(flags).__name__}")
-    if flags < 0:
-        raise ValidationError(f"Flags must be non-negative, got {flags}")
-    if flags >= 2**64:
-        raise ValidationError(f"Flags value exceeds 64-bit range: {flags}")
+    if not 0 <= flags < 2**64:
+        raise ValidationError("Flags must fit in an unsigned 64-bit integer")
     return flags
 
 
 def validate_pin_range(pin: int) -> int:
-    """Validate that a pin number is within valid range (0-63 for BK7231N).
-
-    Args:
-        pin: Pin number to validate.
-
-    Returns:
-        The validated pin number.
-
-    Raises:
-        ValidationError: If pin is outside 0-63 range.
-    """
-    if not isinstance(pin, int) or isinstance(pin, bool):
-        raise ValidationError(f"Pin must be an integer, got {type(pin).__name__}")
-    if not 0 <= pin <= 63:
+    if not isinstance(pin, int) or isinstance(pin, bool) or not 0 <= pin <= 63:
         raise ValidationError(f"Pin must be 0-63, got {pin}")
     return pin
 
 
 def validate_channel_range(channel: int) -> int:
-    """Validate that a channel number is within valid range (0-63).
-
-    Note: This is for pin channel assignment (0-63), not the device channel
-    number used in power control (which is 1-based and validated by validate_channel).
-
-    Args:
-        channel: Channel number to validate.
-
-    Returns:
-        The validated channel number.
-
-    Raises:
-        ValidationError: If channel is outside 0-63 range.
-    """
-    if not isinstance(channel, int) or isinstance(channel, bool):
-        raise ValidationError(f"Channel must be an integer, got {type(channel).__name__}")
-    if not 0 <= channel <= 63:
+    if not isinstance(channel, int) or isinstance(channel, bool) or not 0 <= channel <= 63:
         raise ValidationError(f"Channel must be 0-63, got {channel}")
     return channel
 
 
+def validate_gpio_role(role: str) -> str:
+    value = validate_required_string(role, "role")
+    if value not in _GPIO_ROLES:
+        raise ValidationError(f"Unsupported GPIO role: {value}")
+    return value
+
+
 def validate_name_pattern(name: str) -> str:
-    """Validate that a device name matches the allowed pattern.
-
-    OpenBK device names only allow: letters (a-z, A-Z), digits (0-9),
-    underscores (_), and hyphens (-). No spaces or special characters.
-
-    Args:
-        name: Name string to validate.
-
-    Returns:
-        The trimmed name string.
-
-    Raises:
-        ValidationError: If name contains invalid characters or is empty.
-    """
-    name = validate_required_string(name, "name")
-    if not _NAME_PATTERN.match(name):
+    value = validate_required_string(name, "name")
+    if not _NAME_PATTERN.fullmatch(value):
         raise ValidationError(
-            f"Name '{name}' contains invalid characters. "
+            f"Name '{value}' contains invalid characters. "
             "Only letters, digits, underscores, and hyphens are allowed."
         )
-    return name
+    return value
 
 
 def validate_mqtt_port(port: int) -> int:
-    """Validate that an MQTT port number is within valid range (1-65535).
-
-    Args:
-        port: Port number to validate.
-
-    Returns:
-        The validated port number.
-
-    Raises:
-        ValidationError: If port is outside 1-65535 range.
-    """
-    if not isinstance(port, int) or isinstance(port, bool):
-        raise ValidationError(f"Port must be an integer, got {type(port).__name__}")
-    if not 1 <= port <= 65535:
+    if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ValidationError(f"Port must be 1-65535, got {port}")
     return port
 
 
 def validate_positive_int(value: int, name: str) -> int:
-    """Validate that a value is a positive integer.
-
-    Args:
-        value: Value to validate.
-        name: Parameter name for error messages.
-
-    Returns:
-        The validated value.
-
-    Raises:
-        ValidationError: If value is not a positive integer.
-    """
-    if not isinstance(value, int) or isinstance(value, bool):
-        raise ValidationError(f"{name} must be an integer, got {type(value).__name__}")
-    if value <= 0:
-        raise ValidationError(f"{name} must be positive, got {value}")
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise ValidationError(f"{name} must be a positive integer")
     return value

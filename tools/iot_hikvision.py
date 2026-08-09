@@ -31,21 +31,21 @@ from tools.hikvision.isapi_client import create_isapi_client
 from tools.validators import ValidationError, validate_required_string
 
 __all__ = [
-    "register_hikvision_tools",
-    "_hikvision_container_status",
-    "_hikvision_container_logs",
     "_hikvision_check_vmd",
-    "_hikvision_restart_container",
-    "_hikvision_take_snapshot",
-    "_hikvision_open_gate",
+    "_hikvision_container_logs",
+    "_hikvision_container_status",
     "_hikvision_device_info",
-    "_hikvision_get_motion_config",
-    "_hikvision_set_motion_detection",
-    "_hikvision_get_event_config",
     "_hikvision_get_alarm_server",
-    "_hikvision_snapshot_to_file",
+    "_hikvision_get_event_config",
+    "_hikvision_get_motion_config",
     "_hikvision_isapi_health",
+    "_hikvision_open_gate",
     "_hikvision_pipeline_diagnose",
+    "_hikvision_restart_container",
+    "_hikvision_set_motion_detection",
+    "_hikvision_snapshot_to_file",
+    "_hikvision_take_snapshot",
+    "register_hikvision_tools",
 ]
 
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## [2.0.0] — 2026-08-09
+
+### Breaking
+- Removed legacy SSE and custom REST/JSON-RPC execution surfaces; supported transports are stdio and Streamable HTTP.
+- Public legacy JSON-string success/error semantics are replaced by typed data and MCP tool errors.
+- Target selection is exact and authorization-bound with no silent fallback; retry/timeout behavior is now fail-closed with explicit unknown outcomes. These semantic changes require a major version.
+
+### Added
+- Application-owned policy kernel with stable target authorization/revalidation, bounded concurrency, principal ACLs, governed artifacts, and dependency-aware readiness.
+- Bounded HTTP connection admission, queue wait, ingress read, headers/body limits, Host/Origin checks, and bounded final response capture.
+- Stable public error codes with `retryable` and `unknown_outcome` fields.
+- Isolated-quarantine registry release flow that promotes only a smoke-tested registry digest in the protected publisher.
+
+### Fixed
+- Rate-limiter principal registry now has bounded cardinality and expiry cleanup.
+- Public MCP calls use the invocation's immutable Settings for the legacy write guard and safety target wrappers rather than stale first-import/first-install server state.
+- Release publishing no longer loads or executes candidate image bytes in the privileged job.
+- Repository diagnostic validation is pinned to ai-skills revision `b54fc6b27ea80b36a70d5de73445970e17f55789`.
+
+### Verification status
+- Candidate-local quality, tests, exact wheel, and container CI must pass on the final 2.0.0 SHA after these changes.
+- Previous real-device observations were made on an earlier candidate and are not acceptance evidence for the new SHA. Re-run `tests/real_system_todos.py` on the final deployed image.
+- Provider-backed external acceptance and independent review remain required before claiming ai-skills adoption approval.
+
 ## [1.6.0] — 2026-06-07
 
 ### Added

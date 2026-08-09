@@ -26,11 +26,13 @@ class TestGetMqttClient:
         with patch("paho.mqtt.client.Client") as mock_client_class:
             mock_client = MagicMock()
             mock_client_class.return_value = mock_client
-            with patch("tools.iot_mqtt.MQTT_USER", "testuser"):
-                with patch("tools.iot_mqtt.MQTT_PASSWORD", "testpass"):
-                    client = _get_mqtt_client()
-                    assert client is not None
-                    mock_client.username_pw_set.assert_called_once_with("testuser", "testpass")
+            with (
+                patch("tools.iot_mqtt.MQTT_USER", "testuser"),
+                patch("tools.iot_mqtt.MQTT_PASSWORD", "testpass"),
+            ):
+                client = _get_mqtt_client()
+                assert client is not None
+                mock_client.username_pw_set.assert_called_once_with("testuser", "testpass")
 
     def test_get_client_no_paho(self):
         """Should return None when paho-mqtt is not installed."""

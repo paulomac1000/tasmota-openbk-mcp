@@ -7,6 +7,7 @@ OpenBK, Tasmota, and other IoT device types. Used by all Wave 2
 configuration tools (set_flags, set_name, configure_mqtt, etc.).
 """
 
+import contextlib
 import json
 import urllib.parse
 from typing import Any, NoReturn
@@ -68,10 +69,8 @@ class _DeviceHttpSession:
         status: int = exc.response.status_code if exc.response is not None else 0
         body: str = ""
         if exc.response is not None:
-            try:
+            with contextlib.suppress(Exception):  # nosec B110 - best-effort body extraction
                 body = exc.response.text[:100]
-            except Exception:  # nosec B110 - best-effort body extraction
-                pass
         raise DeviceConnectionError(f"HTTP {status}: {body}") from exc
 
     # ------------------------------------------------------------------

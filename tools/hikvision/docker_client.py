@@ -6,6 +6,7 @@ Uses Docker HTTP API via unix socket (/var/run/docker.sock).
 No external dependencies - uses only Python stdlib.
 """
 
+import contextlib
 import json
 import os
 import socket
@@ -18,10 +19,10 @@ CONTAINER_NAME = HIKVISION_CONTAINER_NAME
 
 __all__ = [
     "_docker_available",
-    "get_container_status",
-    "get_container_logs",
-    "count_vmd_events",
     "count_call_events",
+    "count_vmd_events",
+    "get_container_logs",
+    "get_container_status",
     "restart_container",
 ]
 
@@ -188,15 +189,11 @@ def get_container_logs(since: str = "1h", tail: int = 100) -> str:
     """
     since_seconds = 0
     if since.endswith("h"):
-        try:
+        with contextlib.suppress(ValueError):
             since_seconds = int(since[:-1]) * 3600
-        except ValueError:
-            pass
     elif since.endswith("m"):
-        try:
+        with contextlib.suppress(ValueError):
             since_seconds = int(since[:-1]) * 60
-        except ValueError:
-            pass
 
     now = int(time.time())
     since_ts = now - since_seconds if since_seconds > 0 else now - 3600

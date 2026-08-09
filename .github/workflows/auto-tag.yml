@@ -1,63 +1,47 @@
-name: Auto-tag on merge to main
+name: Validate release request
 
 on:
-  pull_request:
-    branches: [main]
-    types: [closed]
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Semantic version (e.g. 1.2.3)'
+      release_ref:
+        description: Existing v* tag or full 40-character commit SHA reachable from main
         required: true
         type: string
 
-concurrency:
-  group: auto-tag-${{ github.ref }}
-  cancel-in-progress: true
+permissions:
+  contents: read
 
-env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+concurrency:
+  group: validate-release-request
+  cancel-in-progress: false
 
 jobs:
-  tag:
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
-
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6
+      - name: Check out history read-only
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Determine release version
-        id: version
+      - name: Validate immutable release selection
+        env:
+          RELEASE_REF: ${{ inputs.release_ref }}
         run: |
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          if [[ "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            SHA="$RELEASE_REF"
+          elif [[ "$RELEASE_REF" == v* ]]; then
+            git show-ref --verify --quiet "refs/tags/$RELEASE_REF"
+            SHA="$(git rev-parse "refs/tags/$RELEASE_REF^{commit}")"
           else
-            VERSION=$(grep 'version = ' pyproject.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+            echo "release_ref must be an existing v* tag or full SHA" >&2
+            exit 1
           fi
-          echo "Using version: $(grep version= $GITHUB_OUTPUT | cut -d= -f2)"
-
-      - name: Create and push tag
-        env:
-          GH_TOKEN: ${{ github.token }}
+          git merge-base --is-ancestor "$SHA" origin/main
+          echo "Validated release candidate: $SHA"
+      - name: Explain protected release flow
         run: |
-          if git rev-parse "v${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
-            echo "Tag v${{ steps.version.outputs.version }} already exists — skipping"
-            exit 0
-          fi
-          git -c user.name="local-home-devices-mcp-bot" -c user.email="bot@local-home-devices-mcp.local" tag -a "v${{ steps.version.outputs.version }}" -m "Release v${{ steps.version.outputs.version }}"
-          git push https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git "v${{ steps.version.outputs.version }}"
-
-      - name: Trigger downstream publish
-        run: |
-          gh workflow run publish.yml \
-            --ref "v${{ steps.version.outputs.version }}" \
-            || echo "::warning::Publish workflow trigger failed or workflow not found"
-        env:
-          GH_TOKEN: ${{ github.token }}
+          echo "This workflow never tags or publishes."
+          echo "Run publish.yml only after exact-SHA CI and external acceptance evidence pass."

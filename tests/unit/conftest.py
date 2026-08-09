@@ -6,23 +6,11 @@ No real devices, credentials, or network calls.
 """
 
 import shutil as _shutil
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from tests.fixtures import MOCK_OPENBK_DEVICE, MOCK_TASMOTA_DEVICE
-
-# ---------------------------------------------------------------------------
-# Mock fastmcp BEFORE any test module imports server.py.
-# The installed fastmcp 2.0.0 has broken transitive dependencies
-# (missing fastmcp.mcp_config, fastmcp.client.auth, etc.).
-# A MagicMock satisfies everything server.py needs.
-# ---------------------------------------------------------------------------
-_fastmcp_mock = MagicMock()
-_fastmcp_mock.FastMCP = MagicMock()
-if "fastmcp" not in sys.modules:
-    sys.modules["fastmcp"] = _fastmcp_mock
 
 
 @pytest.fixture(autouse=True)

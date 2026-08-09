@@ -1,64 +1,57 @@
-# mypy: disable-error-code="untyped-decorator"
-"""
-IoT Capability Introspection Tool
+"""Protocol-visible capability discovery backed by the canonical public catalog."""
 
-Exposes the tool catalog and manifests over the MCP transport itself, so that
-agents connected over pure SSE can inspect capability metadata without invoking
-each tool. The REST /api/tools/{name}/manifest endpoint is unreachable for such
-agents - this tool closes that gap.
-"""
+from __future__ import annotations
 
 from typing import Any
 
+from local_home_devices_mcp.composition import (
+    ADOPTION_PROFILES,
+    SUPPORTED_PROTOCOL_REVISIONS,
+    package_version,
+)
+from local_home_devices_mcp.config import load_settings
+from local_home_devices_mcp.manifests import (
+    MANIFEST_SCHEMA_VERSION,
+    is_runtime_active,
+)
+from local_home_devices_mcp.public_catalog import build_public_catalog
 from tools.constants import (
     TOOL_MANIFESTS,
-    TOOLS_VERSION,
-    _error_response_extended,
-    _success_response,
     increment_tool_count,
     inject_tool_risk_prefix,
     start_tool_context,
 )
 
-__all__ = ["register_iot_meta_tools", "_describe_capabilities"]
+__all__ = ["_describe_capabilities", "register_iot_meta_tools"]
 
 
-def _describe_capabilities() -> str:
-    """Return the full tool catalog with manifests and supported transports.
-
-    Returns:
-        JSON string with schema version, transports and per-tool manifests.
-    """
-    return _success_response(
-        {
-            "server": "IoT-Observer",
-            "schema_version": TOOLS_VERSION,
-            "transports": ["sse", "rest"],
-            "tool_count": len(TOOL_MANIFESTS),
-            "tools": [TOOL_MANIFESTS[name] for name in sorted(TOOL_MANIFESTS)],
-        }
-    )
+def _describe_capabilities() -> dict[str, Any]:
+    settings = load_settings()
+    catalog = build_public_catalog(TOOL_MANIFESTS)
+    active = [manifest for manifest in catalog.values() if is_runtime_active(manifest)]
+    return {
+        "server": "local-home-devices-mcp",
+        "schema_version": MANIFEST_SCHEMA_VERSION,
+        "server_version": package_version(),
+        "sdk_family": "fastmcp",
+        "sdk_version": "3.4.6",
+        "profiles": ADOPTION_PROFILES,
+        "protocol_revisions": SUPPORTED_PROTOCOL_REVISIONS,
+        "supported_transports": ["stdio", "streamable-http"],
+        "active_transport": settings.transport,
+        "auth_profile": settings.auth_profile,
+        "supported_count": len(catalog),
+        "active_count": len(active),
+        "supported_capabilities": list(catalog.values()),
+        "active_capabilities": active,
+    }
 
 
 def register_iot_meta_tools(mcp: Any) -> None:
-    """Register IoT capability introspection tools with the MCP server."""
-
-    @mcp.tool()
+    @mcp.tool()  # type: ignore[untyped-decorator]
     @inject_tool_risk_prefix
-    def describe_iot_capabilities() -> str:
-        """Describe all IoT tools, their manifests and supported transports.
-
-        Use this to inspect tool capability metadata (risk, side effects,
-        timeouts, confirmation requirements) without invoking any tool.
-
-        Returns:
-            JSON with the full tool catalog and manifests.
-
-        @since v1.3.0
-        """
-        try:
-            start_tool_context()
-            increment_tool_count("describe_iot_capabilities")
-            return _describe_capabilities()
-        except Exception as exc:
-            return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
+    def describe_iot_capabilities() -> dict[str, Any]:
+        """Describe supported and active public components through MCP."""
+        start_tool_context()
+        increment_tool_count("describe_iot_capabilities")
+        return _describe_capabilities()

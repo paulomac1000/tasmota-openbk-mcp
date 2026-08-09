@@ -27,11 +27,11 @@ from tools.validators import (
 )
 
 __all__ = [
-    "register_iot_control_tools",
-    "_set_power",
-    "_set_brightness",
-    "_restart_device",
     "_get_wifi_config",
+    "_restart_device",
+    "_set_brightness",
+    "_set_power",
+    "register_iot_control_tools",
 ]
 
 
@@ -135,7 +135,7 @@ def _set_power(identifier: str, state: str, channel: int = 1, timeout_seconds: i
     if device_type == "tuya":
         from tools.iot_tuya import _tuya_set_value
 
-        tuya_state = True if state == "ON" else False
+        tuya_state = state == "ON"
         return _tuya_set_value(identifier, "1", tuya_state)
 
     if device_type == "openhasp":

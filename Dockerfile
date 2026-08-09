@@ -1,35 +1,27 @@
-# Local Home Devices MCP
-# Model Context Protocol server for IoT device management
-# Supports OpenBK (OpenBeken), Tasmota, and Tuya devices
+FROM python:3.13.5-slim@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
 
-FROM python:3.14-slim
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    git \
-    nmap \
-    && rm -rf /var/lib/apt/lists/*
-
-RUN groupadd -r appuser && useradd -r -g appuser -m -d /app appuser
-
+RUN groupadd --system mcp && useradd --system --gid mcp --home /app mcp
 WORKDIR /app
+COPY dist/*.whl /tmp/package/
+COPY requirements.lock /tmp/requirements.lock
+COPY wheelhouse/ /tmp/wheelhouse/
+RUN python -m pip install --no-cache-dir \
+      --no-index --find-links=/tmp/wheelhouse --require-hashes \
+      -r /tmp/requirements.lock \
+    && python -m pip install --no-cache-dir --no-index --no-deps /tmp/package/*.whl \
+    && rm -rf /tmp/package /tmp/requirements.lock /tmp/wheelhouse
+RUN mkdir -p /app/data/artifacts && chown -R mcp:mcp /app
+USER mcp
 
-COPY pyproject.toml .
-RUN pip install --no-cache-dir -e ".[mqtt,tuya]"
+ENV MCP_TRANSPORT=http \
+    BIND_HOST=127.0.0.1 \
+    MCP_PORT=9102 \
+    MCP_PATH=/mcp \
+    MCP_ARTIFACT_ROOT=/app/data/artifacts
 
-COPY server.py .
-COPY tools/ ./tools/
-
-RUN mkdir -p /app/data \
-    && chown -R appuser:appuser /app
-
-RUN printf '#!/bin/bash\npython server.py\n' > /app/start.sh && chmod +x /app/start.sh
-
-USER appuser
-
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:9100/health || exit 1
-
-EXPOSE 9100 9101 9102
-
-CMD ["/app/start.sh"]
+EXPOSE 9102
+ENTRYPOINT ["local-home-devices-mcp"]

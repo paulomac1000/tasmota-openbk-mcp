@@ -1,0 +1,7 @@
+schema_version: 1
+workflows:
+  .github/workflows/auto-tag.yml: trusted-ci
+  .github/workflows/ci.yml: pull-request
+  .github/workflows/publish.yml: protected-release
+  .github/workflows/semgrep.yml: pull-request
+  .github/workflows/semgrep-scheduled.yml: trusted-ci

@@ -1,70 +1,66 @@
-"""E2E tests: full REST API pipeline."""
+"""End-to-end MCP lifecycle through the official client over real stdio.
+
+In-memory `Client(mcp)` tests are not accepted as transport evidence (see
+README), so the server is exercised as an actual stdio subprocess here.
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
 
 import pytest
-import requests
 
-from .conftest import REST_API_URL, server_is_running
+mcp = pytest.importorskip("mcp", reason="official MCP client dependency is required")
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
 
-pytestmark = [
-    pytest.mark.e2e,
-    pytest.mark.skipif(
-        not server_is_running(),
-        reason="MCP server not running",
-    ),
-]
+pytestmark = [pytest.mark.e2e, pytest.mark.asyncio]
+
+ROOT = Path(__file__).resolve().parents[2]
 
 
-class TestServerAPI:
-    """Server REST API integration tests."""
+def _env(tmp_path: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "MCP_MOCK_MODE": "1",
+        "MCP_TRANSPORT": "stdio",
+        "ENABLE_WRITE_OPERATIONS": "1",
+        "MCP_ARTIFACT_ROOT": str(tmp_path / "artifacts"),
+    }
 
-    def test_health_endpoint(self):
-        resp = requests.get(f"{REST_API_URL}/health", timeout=5)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "healthy"
 
-    def test_api_health(self):
-        resp = requests.get(f"{REST_API_URL}/api/health", timeout=5)
-        assert resp.status_code == 200
-        assert resp.json()["status"] == "healthy"
+async def test_initialize_discover_call_and_restore(tmp_path: Path):
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(ROOT / "server.py")],
+        env=_env(tmp_path),
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        names = {tool.name for tool in tools.tools}
+        assert names == {
+            "mock_get_state",
+            "mock_set_power",
+            "mock_wait",
+            "mock_capture_snapshot",
+        }
 
-    def test_tools_list_endpoint(self):
-        resp = requests.get(f"{REST_API_URL}/api/tools", timeout=10)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-        assert data["total"] == 51
-        tool_names = [t["name"] for t in data["tools"]]
-        assert "iot_discover_devices" in tool_names
-        assert "iot_get_device_info" in tool_names
-        assert "iot_set_power" in tool_names
+        before = await session.call_tool("mock_get_state", {"identifier": "dev_mock_light"})
+        assert before.isError is not True
 
-    def test_call_tool_via_rest(self):
-        resp = requests.post(
-            f"{REST_API_URL}/api/tools/iot_list_devices",
-            json={},
-            timeout=10,
+        changed = await session.call_tool(
+            "mock_set_power", {"identifier": "dev_mock_light", "power": True}
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["success"] is True
-        assert data["tool"] == "iot_list_devices"
+        assert changed.isError is not True
 
-    def test_nonexistent_tool_returns_404(self):
-        resp = requests.post(
-            f"{REST_API_URL}/api/tools/nonexistent_tool_xyz",
-            json={},
-            timeout=10,
+        restored = await session.call_tool(
+            "mock_set_power", {"identifier": "dev_mock_light", "power": False}
         )
-        assert resp.status_code == 404
-        data = resp.json()
-        assert data["success"] is False
+        assert restored.isError is not True
 
-    def test_tool_call_invalid_json(self):
-        resp = requests.post(
-            f"{REST_API_URL}/api/tools/iot_list_devices",
-            data="not json",
-            headers={"Content-Type": "text/plain"},
-            timeout=10,
-        )
-        assert resp.status_code in (200, 400, 415, 500)
+        after = await session.call_tool("mock_get_state", {"identifier": "dev_mock_light"})
+        assert after.isError is not True

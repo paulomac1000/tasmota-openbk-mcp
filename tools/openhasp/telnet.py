@@ -4,6 +4,7 @@ telnetlib sends IAC negotiation bytes (0xFF 0xFD...) that crash
 OpenHASP. Use plain socket.socket() + sendall() + recv().
 """
 
+import contextlib
 import json
 import re
 import socket
@@ -52,10 +53,8 @@ class OpenHASPTelnet:
     def disconnect(self) -> None:
         """Close the TCP connection."""
         if self._sock:
-            try:
+            with contextlib.suppress(Exception):
                 self._sock.close()
-            except Exception:
-                pass
             self._sock = None
 
     def send_command(self, command: str, wait: float = 1.5) -> str:
