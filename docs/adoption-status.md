@@ -47,8 +47,10 @@ Run:
 ```
 
 The local isolated environment is used for every zero-I/O test available in the workspace.
-Hosted CI remains authoritative for the pinned Ruff, mypy, Bandit, FastMCP client, exact-wheel,
-and container lanes that are unavailable in the restricted local package/network environment.
+Hosted CI is authoritative for the pinned Ruff, mypy, Bandit, FastMCP client, exact-wheel,
+and container lanes and is **green on the current candidate revision** (`agent/ai-skills-compliance-refactor`
+at `e5f03ff`): the quality, test, exact-wheel, and container jobs all pass, and the produced
+wheel and image artifacts carry the exact tested revision digest.
 
 ## Pending evidence
 
@@ -57,7 +59,9 @@ revision, exact `ai-skills` revision, skill version, maturity/profile selection,
 workflow evidence, artifact identities, and independent decision all refer to the same immutable
 candidate. Placeholder run IDs, digests, reviewers, or approval decisions are forbidden.
 
-The public pull request remains a draft until those hosted checks and review are complete.
+The public pull request remains a draft until an independent review is bound to the exact
+candidate revision. Hosted CI checks are complete; the remaining blocker is that independent
+review, not a code defect.
 Real-device checks are separately enumerated in `tests/real_system_todos.py` and remain blocking
 for claims about physical target identity, ambiguous mutation outcomes, expected disconnects,
 and backend-specific compensation.
