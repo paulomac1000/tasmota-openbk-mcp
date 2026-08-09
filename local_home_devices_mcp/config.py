@@ -39,11 +39,7 @@ def _token(value: str | None, name: str) -> str | None:
 
 
 def _csv(name: str, default: str = "") -> tuple[str, ...]:
-    values = tuple(
-        item.strip()
-        for item in os.getenv(name, default).split(",")
-        if item.strip()
-    )
+    values = tuple(item.strip() for item in os.getenv(name, default).split(",") if item.strip())
     if len(values) != len(set(values)):
         raise ValueError(f"{name} must not contain duplicates")
     return values
@@ -148,9 +144,7 @@ class Settings:
                     "HTTP transport requires a configured JWT/JWKS provider or "
                     "development-only scoped static token"
                 )
-            if self.has_static_auth and not (
-                self.http_development_mode or self.mock_mode
-            ):
+            if self.has_static_auth and not (self.http_development_mode or self.mock_mode):
                 raise ValueError(
                     "static HTTP tokens are development/test only; configure "
                     "MCP_HTTP_DEVELOPMENT_MODE=1 or a JWT/JWKS provider"
@@ -168,22 +162,12 @@ class Settings:
         for origin in self.allowed_origins:
             parsed = urlsplit(origin)
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-                raise ValueError(
-                    "MCP_ALLOWED_ORIGINS entries must be absolute http(s) origins"
-                )
+                raise ValueError("MCP_ALLOWED_ORIGINS entries must be absolute http(s) origins")
             if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
-                raise ValueError(
-                    "MCP_ALLOWED_ORIGINS entries must not include path/query/fragment"
-                )
+                raise ValueError("MCP_ALLOWED_ORIGINS entries must not include path/query/fragment")
 
-        if (
-            not self.mcp_path.startswith("/")
-            or "?" in self.mcp_path
-            or "#" in self.mcp_path
-        ):
-            raise ValueError(
-                "MCP_PATH must be an absolute URL path without query or fragment"
-            )
+        if not self.mcp_path.startswith("/") or "?" in self.mcp_path or "#" in self.mcp_path:
+            raise ValueError("MCP_PATH must be an absolute URL path without query or fragment")
         if self.artifact_root == Path("/"):
             raise ValueError("MCP_ARTIFACT_ROOT cannot be the filesystem root")
 
@@ -201,9 +185,7 @@ class Settings:
         if len(tokens) != len(set(tokens)):
             raise ValueError("MCP auth tokens must be distinct")
         if not 1 <= self.max_response_bytes <= 16 * 1024 * 1024:
-            raise ValueError(
-                "MCP_MAX_RESPONSE_BYTES must be between 1 and 16777216"
-            )
+            raise ValueError("MCP_MAX_RESPONSE_BYTES must be between 1 and 16777216")
 
     def static_tokens(self) -> dict[str, dict[str, object]]:
         """Return development principals with explicit, independent scopes."""
@@ -259,7 +241,7 @@ class Settings:
         return tokens
 
     @classmethod
-    def for_mock(cls) -> "Settings":
+    def for_mock(cls) -> Settings:
         """Return deterministic zero-I/O settings for tests and smoke checks."""
         return cls(
             transport="stdio",
@@ -269,7 +251,9 @@ class Settings:
             write_enabled=True,
             dangerous_enabled=False,
             allow_direct_ip_targets=False,
-            allowed_networks=(ipaddress.ip_network("192.168.0.0/16"),),
+            allowed_networks=(
+                ipaddress.ip_network("192.168.0.0/16", strict=False),  # type: ignore[arg-type]
+            ),
             artifact_root=Path("data/artifacts").resolve(),
             max_artifact_bytes=8 * 1024 * 1024,
             max_artifact_store_bytes=128 * 1024 * 1024,
@@ -293,9 +277,7 @@ def load_settings() -> Settings:
     if transport_raw in {"streamable-http", "streamable_http"}:
         transport_raw = "http"
     if transport_raw not in {"stdio", "http"}:
-        raise ValueError(
-            "MCP_TRANSPORT must be 'stdio' or 'http'; legacy SSE is not supported"
-        )
+        raise ValueError("MCP_TRANSPORT must be 'stdio' or 'http'; legacy SSE is not supported")
 
     raw_networks = os.getenv(
         "MCP_ALLOWED_TARGET_NETWORKS",
@@ -311,9 +293,7 @@ def load_settings() -> Settings:
             raise ValueError("Only IPv4 target networks are currently supported")
         networks.append(network)
     if not networks:
-        raise ValueError(
-            "MCP_ALLOWED_TARGET_NETWORKS must contain at least one network"
-        )
+        raise ValueError("MCP_ALLOWED_TARGET_NETWORKS must contain at least one network")
 
     legacy = _token(os.getenv("MCP_AUTH_TOKEN"), "MCP_AUTH_TOKEN")
     read_token = _token(
@@ -332,9 +312,7 @@ def load_settings() -> Settings:
         dangerous_enabled=_bool("ENABLE_DANGEROUS_OPERATIONS", False),
         allow_direct_ip_targets=_bool("MCP_ALLOW_DIRECT_IP_TARGETS", False),
         allowed_networks=tuple(networks),
-        artifact_root=Path(
-            os.getenv("MCP_ARTIFACT_ROOT", "data/artifacts")
-        ).resolve(),
+        artifact_root=Path(os.getenv("MCP_ARTIFACT_ROOT", "data/artifacts")).resolve(),
         max_artifact_bytes=_int(
             "MCP_MAX_ARTIFACT_BYTES",
             8 * 1024 * 1024,

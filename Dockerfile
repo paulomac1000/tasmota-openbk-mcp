@@ -1,4 +1,4 @@
-FROM python:3.13.5-slim@sha256:8df0e8c47e9fdfc3abf4f098453051f8f4c2202be8c0d2d3850058adf3a58517
+FROM python:3.13.5-slim@sha256:4c2cf9917bd1cbacc5e9b07320025bdb7cdf2df7b0ceaccb55e9dd7e30987419
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -6,14 +6,14 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN groupadd --system mcp && useradd --system --gid mcp --home /app mcp
 WORKDIR /app
-COPY dist/*.whl /tmp/package.whl
+COPY dist/*.whl /tmp/package/
 COPY requirements.lock /tmp/requirements.lock
 COPY wheelhouse/ /tmp/wheelhouse/
 RUN python -m pip install --no-cache-dir \
       --no-index --find-links=/tmp/wheelhouse --require-hashes \
       -r /tmp/requirements.lock \
-    && python -m pip install --no-cache-dir --no-index --no-deps /tmp/package.whl \
-    && rm -rf /tmp/package.whl /tmp/requirements.lock /tmp/wheelhouse
+    && python -m pip install --no-cache-dir --no-index --no-deps /tmp/package/*.whl \
+    && rm -rf /tmp/package /tmp/requirements.lock /tmp/wheelhouse
 RUN mkdir -p /app/data/artifacts && chown -R mcp:mcp /app
 USER mcp
 

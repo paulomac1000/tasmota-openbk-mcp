@@ -589,7 +589,7 @@ class TestBuildUrlTasmotaV2:
 
     def test_set_name_with_full_name(self):
         """tasmota set_name with full_name returns backlog with FriendlyName1."""
-        url, dt = _build_url("tasmota", "set_name", short_name="Short", full_name="Full_Name")
+        url, _dt = _build_url("tasmota", "set_name", short_name="Short", full_name="Full_Name")
         assert "backlog" in url
         assert "DeviceName" in url
         assert "FriendlyName1" in url
@@ -613,7 +613,7 @@ class TestBuildUrlTasmotaV2:
 
     def test_configure_mqtt_multi_param(self):
         """tasmota configure_mqtt with multiple params returns backlog URL."""
-        url, dt = _build_url(
+        url, _dt = _build_url(
             "tasmota", "configure_mqtt", host="192.168.1.1", port=1883, client="test"
         )
         assert "backlog" in url

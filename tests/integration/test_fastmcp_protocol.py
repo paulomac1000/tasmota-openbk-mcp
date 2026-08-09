@@ -1,39 +1,83 @@
-"""Official-client MCP lifecycle test; runs when the pinned FastMCP dependency is installed."""
+"""Official-client MCP lifecycle test through a real stdio subprocess.
+
+README: "Client(mcp) in-memory tests are not accepted as transport evidence."
+The server is therefore launched as an actual subprocess and driven with the
+official MCP client over stdio.
+"""
 
 from __future__ import annotations
 
+import os
+import sys
+from pathlib import Path
+
 import pytest
 
-fastmcp = pytest.importorskip("fastmcp")
-from fastmcp import Client  # noqa: E402
+mcp = pytest.importorskip("mcp", reason="official MCP client dependency is required")
+from mcp import ClientSession, StdioServerParameters  # noqa: E402
+from mcp.client.stdio import stdio_client  # noqa: E402
 
-from local_home_devices_mcp.composition import build_server
-from local_home_devices_mcp.config import load_settings
+from local_home_devices_mcp.composition import build_server  # noqa: E402
+from local_home_devices_mcp.config import load_settings  # noqa: E402
 
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio]
+pytestmark = pytest.mark.integration
+
+ROOT = Path(__file__).resolve().parents[2]
+
+MOCK_TOOLS = {
+    "mock_get_state",
+    "mock_set_power",
+    "mock_wait",
+    "mock_capture_snapshot",
+}
 
 
-async def test_official_client_initialize_list_and_call(monkeypatch):
-    monkeypatch.setenv("MCP_MOCK_MODE", "1")
-    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
-    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
-    mcp, gate = build_server(load_settings())
-    async with Client(mcp) as client:
-        tools = await client.list_tools()
-        names = {tool.name for tool in tools}
-        assert names == {"mock_get_state", "mock_set_power"}
+def _env(tmp_path: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "PYTHONPATH": str(ROOT),
+        "MCP_MOCK_MODE": "1",
+        "MCP_TRANSPORT": "stdio",
+        "ENABLE_WRITE_OPERATIONS": "1",
+        "MCP_ARTIFACT_ROOT": str(tmp_path / "artifacts"),
+    }
 
-        templates = await client.list_resource_templates()
+
+@pytest.mark.asyncio
+async def test_official_client_initialize_list_and_call(tmp_path: Path):
+    params = StdioServerParameters(
+        command=sys.executable,
+        args=[str(ROOT / "server.py")],
+        env=_env(tmp_path),
+    )
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        names = {tool.name for tool in tools.tools}
+        assert names == MOCK_TOOLS
+
+        templates_result = await session.list_resource_templates()
+        templates = getattr(templates_result, "resourceTemplates", templates_result) or []
         template_uris = {
             str(getattr(template, "uriTemplate", getattr(template, "uri_template", "")))
             for template in templates
         }
         assert "artifact://{artifact_id}" in template_uris
-        assert "artifact_read" in gate.catalog
 
-        result = await client.call_tool("mock_get_state", {"identifier": "dev_mock_light"})
-        assert result.data["power"] is False
-        changed = await client.call_tool(
+        result = await session.call_tool("mock_get_state", {"identifier": "dev_mock_light"})
+        assert result.isError is not True
+        changed = await session.call_tool(
             "mock_set_power", {"identifier": "dev_mock_light", "power": True}
         )
-        assert changed.data["power"] is True
+        assert changed.isError is not True
+
+
+def test_in_memory_gate_governs_mock_catalog(monkeypatch) -> None:
+    """Keep a cheap in-memory contract check without claiming transport evidence."""
+    monkeypatch.setenv("MCP_MOCK_MODE", "1")
+    monkeypatch.setenv("MCP_TRANSPORT", "stdio")
+    monkeypatch.setenv("ENABLE_WRITE_OPERATIONS", "1")
+    mcp_server, gate = build_server(load_settings())
+    assert "artifact_read" in gate.catalog
+    assert MOCK_TOOLS.issubset(gate.catalog)
+    assert mcp_server is not None

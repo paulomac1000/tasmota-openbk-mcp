@@ -33,20 +33,16 @@ def test_mock_catalog_is_canonical_and_has_no_legacy_top_level_fields():
 
 def test_lifecycle_is_separate_from_runtime_availability():
     degraded = normalize_manifest(
-        "sample_read",
+        "mock_get_state",
         {
-            "name": "sample_read",
-            "risk": "READ",
-            "side_effects": "read",
+            **MOCK_MANIFESTS["mock_get_state"],
             "active_state": "degraded",
         },
     )
     unavailable = normalize_manifest(
-        "other_read",
+        "mock_set_power",
         {
-            "name": "other_read",
-            "risk": "READ",
-            "side_effects": "read",
+            **MOCK_MANIFESTS["mock_set_power"],
             "active_state": "unavailable",
         },
     )

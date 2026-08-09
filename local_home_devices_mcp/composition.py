@@ -6,8 +6,9 @@ import base64
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable, Mapping
 from importlib.metadata import PackageNotFoundError, version
-from typing import Any, Awaitable, Callable, Mapping, TypeVar
+from typing import Any, TypeVar
 
 from .artifacts import ArtifactError, ArtifactStore
 from .config import Settings, load_settings
@@ -24,13 +25,13 @@ from .manifests import (
     is_runtime_active,
     manifest_timeout_seconds,
 )
+from .mock_runtime import MockTargetResolver
+from .policy import OperationGate, PolicyError, Principal, current_context
 from .public_catalog import (
     PUBLIC_RESOURCE_COMPONENTS,
     build_public_catalog,
     component_kind,
 )
-from .mock_runtime import MockTargetResolver
-from .policy import OperationGate, PolicyError, Principal, current_context
 from .targeting import TargetError
 
 T = TypeVar("T")
@@ -49,7 +50,7 @@ def package_version() -> str:
     try:
         return version("local-home-devices-mcp")
     except PackageNotFoundError:
-        return "2.0.0"
+        return "1.7.0"
 
 
 def _build_auth(settings: Settings) -> Any | None:
@@ -103,9 +104,7 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
         or claims.get("client_id")
         or "authenticated"
     )
-    scopes = frozenset(
-        str(item) for item in (getattr(token, "scopes", None) or [])
-    )
+    scopes = frozenset(str(item) for item in (getattr(token, "scopes", None) or []))
     raw_targets = claims.get("targets")
     if raw_targets is None or raw_targets == "*":
         target_ids = None
@@ -199,7 +198,7 @@ def effective_response_limit(
     )
 
 
-async def _invoke_public_component(
+async def _invoke_public_component[T](
     gate: OperationGate,
     settings: Settings,
     capability_name: str,
@@ -223,9 +222,7 @@ async def _invoke_public_component(
             # This catches oversized application values before adapter serialization.
             # HttpBoundaryMiddleware independently enforces the actual final ASGI body.
             if encoded_response_bytes(result) > maximum:
-                raise PublicInvocationError(
-                    f"final response exceeds {maximum} bytes"
-                )
+                raise PublicInvocationError(f"final response exceeds {maximum} bytes")
             return result
     except TimeoutError as exc:
         raise PublicInvocationError(
@@ -259,6 +256,7 @@ def _install_policy_middleware(
 ) -> None:
     from fastmcp.exceptions import ToolError
     from fastmcp.server.middleware import AuthMiddleware, Middleware
+
     from tools.validators import ValidationError
 
     # FastMCP's AuthMiddleware filters list responses and independently rejects
@@ -318,16 +316,16 @@ def _register_legacy_tools(mcp: Any) -> None:
 def _register_mock_tools(mcp: Any, artifact_store: ArtifactStore) -> None:
     state = {"power": False, "brightness": 50}
 
-    @mcp.tool
+    @mcp.tool  # type: ignore[untyped-decorator]
     def mock_get_state(identifier: str = "dev_mock_light") -> dict[str, Any]:
         return {"identifier": identifier, **state}
 
-    @mcp.tool
+    @mcp.tool  # type: ignore[untyped-decorator]
     def mock_set_power(identifier: str, power: bool) -> dict[str, Any]:
         state["power"] = power
         return {"identifier": identifier, **state}
 
-    @mcp.tool
+    @mcp.tool  # type: ignore[untyped-decorator]
     async def mock_wait(
         identifier: str = "dev_mock_light",
         delay_seconds: float = 1.0,
@@ -339,15 +337,13 @@ def _register_mock_tools(mcp: Any, artifact_store: ArtifactStore) -> None:
         await asyncio.sleep(delay_seconds)
         return {"identifier": identifier, "waited_seconds": delay_seconds}
 
-    @mcp.tool
+    @mcp.tool  # type: ignore[untyped-decorator]
     def mock_capture_snapshot(
         identifier: str = "dev_mock_light",
     ) -> dict[str, Any]:
         context = current_context()
         if context is None or context.target is None:
-            raise ArtifactError(
-                "artifact creation requires an authorized target context"
-            )
+            raise ArtifactError("artifact creation requires an authorized target context")
         metadata = artifact_store.save(
             b"\x89PNG\r\n\x1a\nmock-device-snapshot",
             "image/png",
@@ -372,7 +368,7 @@ def _register_artifact_resource(
     gate: OperationGate,
     settings: Settings,
 ) -> None:
-    @mcp.resource(
+    @mcp.resource(  # type: ignore[untyped-decorator]
         "artifact://{artifact_id}",
         mime_type="application/octet-stream",
     )
@@ -407,6 +403,9 @@ def build_server(
     from starlette.responses import JSONResponse
 
     settings = settings or load_settings()
+    from .targeting import TargetResolver
+
+    target_resolver: TargetResolver
     if settings.mock_mode:
         from .mock_runtime import MOCK_MANIFESTS
 
@@ -439,8 +438,6 @@ def build_server(
         name="Local Home Devices",
         version=package_version(),
         auth=_build_auth(settings),
-        stateless_http=True,
-        json_response=True,
     )
 
     if settings.mock_mode:
@@ -472,26 +469,22 @@ def build_server(
 
     @mcp.custom_route("/ready", methods=["GET"])
     async def ready(_request: Any) -> JSONResponse:
-        registered_tools = set(await mcp.get_tools())
+        # Operator readiness probe: bypass client-auth filtering so a health
+        # check can observe every registered component, not just the caller's.
+        listed_tools = await mcp.list_tools(run_middleware=False)
+        registered_tools = {str(getattr(tool, "name", tool)) for tool in listed_tools}
         active_tools = {
-            name
-            for name, manifest in tool_catalog.items()
-            if is_runtime_active(manifest)
+            name for name, manifest in tool_catalog.items() if is_runtime_active(manifest)
         }
         unexpected_tools = sorted(registered_tools - set(tool_catalog))
         missing_tools = sorted(active_tools - registered_tools)
 
-        templates_getter = getattr(mcp, "get_resource_templates", None)
-        templates = await templates_getter() if callable(templates_getter) else {}
+        templates = await mcp.list_resource_templates(run_middleware=False)
         registered_templates = {str(key) for key in templates}
-        artifact_registered = any(
-            "artifact://" in item for item in registered_templates
-        )
+        artifact_registered = any("artifact://" in item for item in registered_templates)
         resource_ok = artifact_registered and "artifact_read" in gate.catalog
         status = (
-            "ready"
-            if not unexpected_tools and not missing_tools and resource_ok
-            else "not-ready"
+            "ready" if not unexpected_tools and not missing_tools and resource_ok else "not-ready"
         )
         return JSONResponse(
             {
@@ -518,7 +511,11 @@ def run(settings: Settings | None = None) -> None:
     import uvicorn
 
     app = HttpBoundaryMiddleware(
-        mcp.http_app(path=settings.mcp_path),
+        mcp.http_app(
+            path=settings.mcp_path,
+            json_response=True,
+            stateless_http=True,
+        ),
         settings,
     )
     uvicorn.run(
@@ -551,13 +548,9 @@ def capability_document(settings: Settings | None = None) -> str:
             "active_transport": settings.transport,
             "auth_profile": settings.auth_profile,
             "supported_count": len(catalog),
-            "active_count": sum(
-                1 for manifest in catalog.values() if is_runtime_active(manifest)
-            ),
+            "active_count": sum(1 for manifest in catalog.values() if is_runtime_active(manifest)),
             "active_capability_ids": sorted(
-                name
-                for name, manifest in catalog.items()
-                if is_runtime_active(manifest)
+                name for name, manifest in catalog.items() if is_runtime_active(manifest)
             ),
             "capabilities": list(catalog.values()),
         },

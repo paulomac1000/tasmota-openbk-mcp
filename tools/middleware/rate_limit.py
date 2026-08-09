@@ -17,8 +17,8 @@ logger = get_logger("middleware.rate_limit")
 _MCP_RATE_LIMIT_RAW = os.getenv("MCP_RATE_LIMIT", "60")
 try:
     _MCP_RATE_LIMIT_VALUE = int(_MCP_RATE_LIMIT_RAW)
-except ValueError:
-    raise ValueError(f"MCP_RATE_LIMIT must be an integer, got: {_MCP_RATE_LIMIT_RAW}")
+except ValueError as exc:
+    raise ValueError(f"MCP_RATE_LIMIT must be an integer, got: {_MCP_RATE_LIMIT_RAW}") from exc
 if _MCP_RATE_LIMIT_VALUE <= 0:
     raise ValueError(f"MCP_RATE_LIMIT must be > 0, got: {_MCP_RATE_LIMIT_VALUE}")
 DEFAULT_MAX_PER_MIN = _MCP_RATE_LIMIT_VALUE

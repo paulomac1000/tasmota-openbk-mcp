@@ -1,6 +1,7 @@
 """Unit tests for constants module - response helpers, logging, manifests."""
 
 import json
+from typing import ClassVar
 
 import pytest
 
@@ -170,7 +171,7 @@ class TestRiskConsistencyMatrix:
     """Compliance: every manifest must satisfy the Risk Consistency Matrix."""
 
     # risk -> required field values (see mcp-server-standards.md)
-    _MATRIX = {
+    _MATRIX: ClassVar[dict[str, dict[str, object]]] = {
         "READ": {
             "side_effects": {"none", "read"},
             "idempotent": True,

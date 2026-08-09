@@ -20,7 +20,7 @@ def test_composition_uses_official_transports_and_async_gate():
     source = Path("local_home_devices_mcp/composition.py").read_text(encoding="utf-8")
     text = ast.unparse(ast.parse(source))
     assert "mcp.run(transport='stdio')" in text
-    assert "mcp.run(transport='http'" in text
+    assert "mcp.http_app(" in text
     assert "gate.guard_async" in text
     assert "mcp.add_middleware" in text
 

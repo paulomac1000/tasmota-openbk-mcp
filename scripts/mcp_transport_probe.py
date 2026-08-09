@@ -98,33 +98,34 @@ async def _common_read_probe(session: ClientSession) -> set[str]:
 
 async def probe_stdio(command: str, args: list[str]) -> None:
     params = StdioServerParameters(command=command, args=args, env=os.environ.copy())
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            names = await _common_read_probe(session)
-            assert {"mock_set_power", "mock_capture_snapshot"} <= names
-            write_result = await session.call_tool(
-                "mock_set_power",
-                {"identifier": "dev_mock_light", "power": True},
-            )
-            assert write_result.isError is not True
-            await _assert_artifact_resource(session)
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        names = await _common_read_probe(session)
+        assert {"mock_set_power", "mock_capture_snapshot"} <= names
+        write_result = await session.call_tool(
+            "mock_set_power",
+            {"identifier": "dev_mock_light", "power": True},
+        )
+        assert write_result.isError is not True
+        await _assert_artifact_resource(session)
 
 
 async def probe_http(url: str, token: str | None) -> None:
     import httpx
 
     headers = {"Authorization": f"Bearer {token}"} if token else {}
-    async with httpx.AsyncClient(headers=headers) as client:
-        async with streamable_http_client(url, http_client=client) as (read, write, _):
-            async with ClientSession(read, write) as session:
-                names = await _common_read_probe(session)
-                assert "mock_set_power" not in names
-                assert "mock_capture_snapshot" not in names
-                denied = await session.call_tool(
-                    "mock_set_power",
-                    {"identifier": "dev_mock_light", "power": True},
-                )
-                assert denied.isError is True
+    async with (
+        httpx.AsyncClient(headers=headers) as client,
+        streamable_http_client(url, http_client=client) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        names = await _common_read_probe(session)
+        assert "mock_set_power" not in names
+        assert "mock_capture_snapshot" not in names
+        denied = await session.call_tool(
+            "mock_set_power",
+            {"identifier": "dev_mock_light", "power": True},
+        )
+        assert denied.isError is True
 
 
 def main() -> int:

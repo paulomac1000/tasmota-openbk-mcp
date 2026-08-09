@@ -22,7 +22,7 @@ def test_composition_uses_official_transports_and_bounded_http_app():
     tree = ast.parse(source)
     text = ast.unparse(tree)
     assert "mcp.run(transport='stdio')" in text
-    assert "mcp.http_app(path=settings.mcp_path)" in text
+    assert "mcp.http_app(path=settings.mcp_path" in text
     assert "HttpBoundaryMiddleware" in text
     assert "uvicorn.run" in text
     assert "mcp.add_middleware" in text

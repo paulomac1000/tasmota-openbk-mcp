@@ -21,8 +21,17 @@ class SwappingResolver:
         self.cache = cache
         self.revalidated = 0
 
-    async def resolve(self, selector: str) -> BoundTarget:
+    async def resolve(
+        self,
+        selector: str,
+        *,
+        allowed_target_ids: frozenset[str] | None = None,
+    ) -> BoundTarget:
         assert selector == "Kitchen Light"
+        if allowed_target_ids is not None and "dev_kitchen" not in allowed_target_ids:
+            from local_home_devices_mcp.targeting import TargetNotFound
+
+            raise TargetNotFound(f"{selector!r}: no target in authorized namespace")
         return BoundTarget("dev_kitchen", "192.168.1.40", "Kitchen Light", "fp-kitchen")
 
     async def revalidate(self, target: BoundTarget) -> None:
@@ -85,6 +94,7 @@ async def test_legacy_io_uses_authorized_address_after_cache_swap(
     original_power = iot_control._set_power
     original_brightness = iot_control._set_brightness
     original_resolve = iot_discovery._resolve_ip
+    original_find = iot_discovery._find_device_by_identifier
     monkeypatch.setattr(iot_discovery, "_get_cached_devices", lambda: list(cache))
     install_legacy_safety(settings(tmp_path))
     safe_set_power = iot_control._set_power
@@ -103,6 +113,7 @@ async def test_legacy_io_uses_authorized_address_after_cache_swap(
         iot_control._set_power = original_power
         iot_control._set_brightness = original_brightness
         iot_discovery._resolve_ip = original_resolve
+        iot_discovery._find_device_by_identifier = original_find
 
     assert resolver.revalidated == 1
     assert cache[0]["ip"] == "192.168.1.99"

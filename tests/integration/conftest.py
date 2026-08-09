@@ -16,6 +16,11 @@ for env_path in env_paths:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, value = line.split("=", 1)
+                        # IOT_DATA_PATH is a container deployment setting
+                        # provided by docker-compose; the container-only /app
+                        # path must not leak into local test runs.
+                        if key.strip() == "IOT_DATA_PATH":
+                            continue
                         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
         except Exception:
             pass
@@ -53,6 +58,7 @@ class RegistryMCP:
         def register(function):
             self.tools[kwargs.get("name", function.__name__)] = function
             return function
+
         if len(args) == 1 and callable(args[0]) and not kwargs:
             return register(args[0])
         return register

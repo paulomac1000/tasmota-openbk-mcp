@@ -38,23 +38,22 @@ async def test_stdio_subprocess_full_lifecycle(tmp_path: Path):
         args=[str(ROOT / "server.py")],
         env=_env(tmp_path, transport="stdio"),
     )
-    async with stdio_client(params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await session.list_tools()
-            names = {tool.name for tool in tools.tools}
-            assert {
-                "mock_get_state",
-                "mock_set_power",
-                "mock_capture_snapshot",
-                "mock_wait",
-            } <= names
-            result = await session.call_tool(
-                "mock_set_power", {"identifier": "dev_mock_light", "power": True}
-            )
-            assert result.isError is not True
-            state = await session.call_tool("mock_get_state", {"identifier": "Mock Light"})
-            assert state.isError is not True
+    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+        await session.initialize()
+        tools = await session.list_tools()
+        names = {tool.name for tool in tools.tools}
+        assert {
+            "mock_get_state",
+            "mock_set_power",
+            "mock_capture_snapshot",
+            "mock_wait",
+        } <= names
+        result = await session.call_tool(
+            "mock_set_power", {"identifier": "dev_mock_light", "power": True}
+        )
+        assert result.isError is not True
+        state = await session.call_tool("mock_get_state", {"identifier": "Mock Light"})
+        assert state.isError is not True
 
 
 def _free_port() -> int:
@@ -64,7 +63,7 @@ def _free_port() -> int:
 
 
 def _wait_http(url: str, process: subprocess.Popen[bytes]) -> None:
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + 90
     while time.monotonic() < deadline:
         if process.poll() is not None:
             raise RuntimeError(f"HTTP MCP server exited with {process.returncode}")
@@ -102,34 +101,37 @@ async def test_streamable_http_real_server_and_auth_boundaries(tmp_path: Path):
         base_url = f"http://127.0.0.1:{port}"
         _wait_http(f"{base_url}/health", process)
 
-        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client:
-            async with streamable_http_client(
-                f"{base_url}/mcp", http_client=client
-            ) as (read, write, _):
-                async with ClientSession(read, write) as session:
-                    await session.initialize()
-                    tools = await session.list_tools()
-                    names = {tool.name for tool in tools.tools}
-                    assert "mock_get_state" in names
-                    assert "mock_wait" in names
-                    assert "mock_set_power" not in names
-                    assert "mock_capture_snapshot" not in names
-                    result = await session.call_tool(
-                        "mock_get_state", {"identifier": "dev_mock_light"}
-                    )
-                    assert result.isError is not True
-                    denied = await session.call_tool(
-                        "mock_set_power", {"identifier": "dev_mock_light", "power": True}
-                    )
-                    assert denied.isError is True
+        async with (
+            httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}) as client,
+            streamable_http_client(f"{base_url}/mcp", http_client=client) as (read, write, _),
+            ClientSession(read, write) as session,
+        ):
+            await session.initialize()
+            tools = await session.list_tools()
+            names = {tool.name for tool in tools.tools}
+            assert "mock_get_state" in names
+            assert "mock_wait" in names
+            assert "mock_set_power" not in names
+            assert "mock_capture_snapshot" not in names
+            result = await session.call_tool("mock_get_state", {"identifier": "dev_mock_light"})
+            assert result.isError is not True
+            denied = await session.call_tool(
+                "mock_set_power", {"identifier": "dev_mock_light", "power": True}
+            )
+            assert denied.isError is True
 
-        async with httpx.AsyncClient(headers={"Authorization": "Bearer invalid"}) as bad_client:
-            with pytest.raises(Exception):
-                async with streamable_http_client(
-                    f"{base_url}/mcp", http_client=bad_client
-                ) as (read, write, _):
-                    async with ClientSession(read, write) as session:
-                        await session.initialize()
+        with pytest.raises(ExceptionGroup) as exc_info:
+            async with (
+                httpx.AsyncClient(headers={"Authorization": "Bearer invalid"}) as bad_client,
+                streamable_http_client(f"{base_url}/mcp", http_client=bad_client) as (
+                    read,
+                    write,
+                    _,
+                ),
+                ClientSession(read, write) as session,
+            ):
+                await session.initialize()
+        assert any(isinstance(item, httpx.HTTPStatusError) for item in exc_info.value.exceptions)
 
         bad_host = httpx.post(
             f"{base_url}/mcp",

@@ -22,17 +22,13 @@ from tools.constants import (
     start_tool_context,
 )
 
-__all__ = ["register_iot_meta_tools", "_describe_capabilities"]
+__all__ = ["_describe_capabilities", "register_iot_meta_tools"]
 
 
 def _describe_capabilities() -> dict[str, Any]:
     settings = load_settings()
     catalog = build_public_catalog(TOOL_MANIFESTS)
-    active = [
-        manifest
-        for manifest in catalog.values()
-        if is_runtime_active(manifest)
-    ]
+    active = [manifest for manifest in catalog.values() if is_runtime_active(manifest)]
     return {
         "server": "local-home-devices-mcp",
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -52,7 +48,7 @@ def _describe_capabilities() -> dict[str, Any]:
 
 
 def register_iot_meta_tools(mcp: Any) -> None:
-    @mcp.tool()
+    @mcp.tool()  # type: ignore[untyped-decorator]
     @inject_tool_risk_prefix
     def describe_iot_capabilities() -> dict[str, Any]:
         """Describe supported and active public components through MCP."""

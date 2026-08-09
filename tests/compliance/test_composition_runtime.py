@@ -40,7 +40,7 @@ class FakeJWTVerifier:
 
 
 class FakeFastMCP:
-    last: "FakeFastMCP | None" = None
+    last: FakeFastMCP | None = None
 
     def __init__(
         self,
@@ -48,20 +48,17 @@ class FakeFastMCP:
         name: str,
         version: str,
         auth: Any = None,
-        stateless_http: bool = False,
-        json_response: bool = False,
     ) -> None:
         self.name = name
         self.version = version
         self.auth = auth
-        self.stateless_http = stateless_http
-        self.json_response = json_response
         self.tools: dict[str, Any] = {}
         self.resources: dict[str, Any] = {}
         self.routes: dict[str, Any] = {}
         self.middlewares: list[Any] = []
         self.disabled: set[str] = set()
         self.run_calls: list[dict[str, Any]] = []
+        self.http_app_calls: list[dict[str, Any]] = []
         FakeFastMCP.last = self
 
     def tool(self, function: Any = None, **_kwargs: Any) -> Any:
@@ -91,18 +88,21 @@ class FakeFastMCP:
     def disable(self, *, keys: set[str]) -> None:
         self.disabled.update(keys)
 
-    async def get_tools(self) -> dict[str, Any]:
-        return {
-            name: function
-            for name, function in self.tools.items()
-            if f"tool:{name}" not in self.disabled
-        }
+    async def list_tools(self, **_: Any) -> list[Any]:
+        from types import SimpleNamespace
 
-    async def get_resource_templates(self) -> dict[str, Any]:
-        return dict(self.resources)
+        return [
+            SimpleNamespace(name=name) for name in self.tools if f"tool:{name}" not in self.disabled
+        ]
 
-    def http_app(self, *, path: str) -> Any:
-        return SimpleNamespace(path=path)
+    async def list_resource_templates(self, **_: Any) -> list[Any]:
+        from types import SimpleNamespace
+
+        return [SimpleNamespace(uriTemplate=uri) for uri in self.resources]
+
+    def http_app(self, **kwargs: Any) -> Any:
+        self.http_app_calls.append(kwargs)
+        return SimpleNamespace(path=kwargs.get("path"))
 
     def run(self, **kwargs: Any) -> None:
         self.run_calls.append(kwargs)
@@ -209,7 +209,7 @@ def test_jwt_auth_uses_reviewed_jwks_verifier(tmp_path: Path, fake_fastmcp: dict
 
 @pytest.mark.asyncio
 async def test_mock_server_registration_routes_artifact_and_middleware(
-    tmp_path: Path, fake_fastmcp: dict[str, Any]
+    tmp_path: Path, fake_fastmcp: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from local_home_devices_mcp.composition import build_server
 
@@ -225,8 +225,15 @@ async def test_mock_server_registration_routes_artifact_and_middleware(
     assert "artifact://{artifact_id}" in mcp.resources
     assert len(mcp.middlewares) == 2
     assert isinstance(mcp.middlewares[0], FakeAuthMiddleware)
-    assert mcp.stateless_http is True
-    assert mcp.json_response is True
+
+    from local_home_devices_mcp.composition import run
+
+    monkeypatch.setattr("uvicorn.run", lambda app, **_kwargs: None)
+    run(settings(tmp_path, transport="http", read_token="r" * 32))
+    http_kwargs = FakeFastMCP.last.http_app_calls[0]
+    assert http_kwargs["stateless_http"] is True
+    assert http_kwargs["json_response"] is True
+    assert http_kwargs["path"] == "/mcp"
 
     principal = Principal("alice", frozenset({"devices:admin"}), "stdio")
     artifact = await gate.invoke_async(
@@ -235,9 +242,7 @@ async def test_mock_server_registration_routes_artifact_and_middleware(
         {"identifier": "Mock Light"},
         principal,
     )
-    fake_fastmcp["value"] = SimpleNamespace(
-        client_id="alice", scopes=["devices:admin"], claims={}
-    )
+    fake_fastmcp["value"] = SimpleNamespace(client_id="alice", scopes=["devices:admin"], claims={})
     content = await mcp.resources["artifact://{artifact_id}"](artifact["artifact_id"])
     assert content.startswith(b"\x89PNG")
 
@@ -278,9 +283,7 @@ async def test_artifact_resource_rejects_read_scope(
     build_server(settings(tmp_path))
     mcp = FakeFastMCP.last
     assert mcp is not None
-    fake_fastmcp["value"] = SimpleNamespace(
-        client_id="reader", scopes=["devices:read"], claims={}
-    )
+    fake_fastmcp["value"] = SimpleNamespace(client_id="reader", scopes=["devices:read"], claims={})
     with pytest.raises(ArtifactError, match="sensitive"):
         await mcp.resources["artifact://{artifact_id}"]("art_" + "a" * 32)
 

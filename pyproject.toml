@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "local-home-devices-mcp"
-version = "2.0.0"
+version = "1.7.0"
 description = "Policy-governed MCP server for local home devices"
 requires-python = ">=3.13,<3.14"
 dependencies = [
@@ -78,3 +78,24 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.13"
 strict = true
 packages = ["local_home_devices_mcp"]
+
+[[tool.mypy.overrides]]
+# tinytuya, defusedxml, and paho ship no type stubs; the reviewed legacy
+# adapters that consume them stay dynamically typed while the application
+# kernel remains strict. tools/iot_tuya delegates to the untyped tinytuya
+# SDK (Any-typed Cloud/Device handles and DP maps), so its SDK-boundary
+# error codes cannot be strictly typed until tinytuya ships py.typed.
+module = [
+  "tools.iot_tuya",
+  "tools.hikvision.isapi_client",
+  "tools.iot_mqtt",
+]
+ignore_missing_imports = true
+disable_error_code = [
+  "no-any-return",
+  "union-attr",
+  "dict-item",
+  "var-annotated",
+  "assignment",
+  "import-untyped",
+]

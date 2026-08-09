@@ -6,7 +6,6 @@ import pytest
 
 from local_home_devices_mcp.config import Settings
 from local_home_devices_mcp.mock_runtime import MOCK_MANIFESTS, MockTargetResolver
-from local_home_devices_mcp.targeting import TargetError
 from local_home_devices_mcp.policy import (
     OperationGate,
     PolicyError,
@@ -14,6 +13,7 @@ from local_home_devices_mcp.policy import (
     RateLimitExceeded,
     current_context,
 )
+from local_home_devices_mcp.targeting import TargetError
 
 pytestmark = pytest.mark.unit
 
@@ -123,7 +123,7 @@ def test_model_force_argument_is_rejected():
         "iot_execute_command": {
             **MOCK_MANIFESTS["mock_set_power"],
             "name": "iot_execute_command",
-            "risk": "DANGEROUS",
+            "risk": "DESTRUCTIVE",
             "side_effects": "destructive",
         }
     }

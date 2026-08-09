@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from copy import deepcopy
 from typing import Any
 
@@ -29,7 +30,7 @@ MOCK_MANIFESTS: dict[str, dict[str, Any]] = {
         "cost": "none",
         "impact": "none",
         "authorization_scopes": ["devices:read"],
-        "concurrency": {"scope": "target", "limit": 4},
+        "concurrency": {"scope": "target", "limit": 1},
         "max_response_bytes": 32 * 1024,
     },
     "mock_set_power": {
@@ -132,3 +133,39 @@ class MockTargetResolver:
         self.revalidations += 1
         if target.target_id != "dev_mock_light" or target.fingerprint != "mock-fingerprint-v1":
             raise TargetNotFound("mock target binding changed")
+
+
+def run_mock_self_test(settings: Any) -> dict[str, Any]:
+    """Run the deterministic zero-I/O governance workflow for smoke checks.
+
+    Returns the same contract that ``server.py --mock-self-test`` prints so
+    subprocess smoke tests and in-process tests exercise identical code.
+    """
+    from .policy import OperationGate, Principal
+
+    resolver = MockTargetResolver()
+    gate = OperationGate(settings, MOCK_MANIFESTS, target_resolver=resolver)
+    principal = Principal("mock-self-test", frozenset({"devices:admin"}), "stdio")
+    state = {"power": False, "brightness": 50}
+
+    async def run_test() -> dict[str, Any]:
+        before = dict(state)
+        after = await gate.invoke_async(
+            "mock_set_power",
+            lambda identifier, power: (
+                state.update(power=power) or {"identifier": identifier, **state}
+            ),
+            {"identifier": "dev_mock_light", "power": True},
+            principal,
+        )
+        state["power"] = before["power"]
+        return {
+            "success": True,
+            "io": "mocked",
+            "before": before,
+            "after": after,
+            "restored": dict(state),
+            "target_revalidations": resolver.revalidations,
+        }
+
+    return asyncio.run(run_test())

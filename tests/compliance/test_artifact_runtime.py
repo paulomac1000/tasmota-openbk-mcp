@@ -30,7 +30,7 @@ def test_artifact_roundtrip_is_integrity_checked(tmp_path: Path):
     actual, content = artifacts.read(meta.artifact_id, requester_subject="alice")
     assert content == b"payload"
     assert actual.sha256 == meta.sha256
-    assert not str((tmp_path / "artifacts").resolve()) in meta.artifact_id
+    assert str((tmp_path / "artifacts").resolve()) not in meta.artifact_id
     if os.name == "posix":
         mode = (tmp_path / "artifacts" / f"{meta.artifact_id}.bin").stat().st_mode
         assert oct(mode & 0o777) == "0o600"

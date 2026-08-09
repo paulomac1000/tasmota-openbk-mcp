@@ -54,9 +54,11 @@ def test_registration_uses_typed_result_and_does_not_swallow_failures(mock_mcp):
     register_iot_meta_tools(mock_mcp)
     function = mock_mcp.get_tool("describe_iot_capabilities")
     assert isinstance(function(), dict)
-    with patch(
-        "tools.iot_meta._describe_capabilities",
-        side_effect=RuntimeError("boom"),
+    with (
+        patch(
+            "tools.iot_meta._describe_capabilities",
+            side_effect=RuntimeError("boom"),
+        ),
+        pytest.raises(RuntimeError, match="boom"),
     ):
-        with pytest.raises(RuntimeError, match="boom"):
-            function()
+        function()

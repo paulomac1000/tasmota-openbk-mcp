@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from copy import deepcopy
-from typing import Any, Mapping
+from typing import Any
 
 MANIFEST_SCHEMA_VERSION = 1
 SERVER_HARD_MAX_RESPONSE_BYTES = 1024 * 1024
@@ -16,15 +17,35 @@ ALLOWED_LATENCY = {"interactive", "bounded-long", "background"}
 ALLOWED_IMPACT = {"none", "local", "external", "cross-tenant"}
 ALLOWED_ACTIVE_STATES = {"active", "inactive", "deprecated"}
 ALLOWED_CONCURRENCY_SCOPES = {
-    "global", "principal", "target", "credential", "resource",
-    "capability", "principal-target", "custom",
+    "global",
+    "principal",
+    "target",
+    "credential",
+    "resource",
+    "capability",
+    "principal-target",
+    "custom",
 }
 
 _REQUIRED_FIELDS = {
-    "schema_version", "id", "name", "description", "operation_kind", "risk",
-    "determinism", "latency", "impact", "active_state", "retryable", "idempotent",
-    "reversible", "requires_confirmation", "idempotency_key_required",
-    "authorization_scopes", "concurrency", "max_response_bytes",
+    "schema_version",
+    "id",
+    "name",
+    "description",
+    "operation_kind",
+    "risk",
+    "determinism",
+    "latency",
+    "impact",
+    "active_state",
+    "retryable",
+    "idempotent",
+    "reversible",
+    "requires_confirmation",
+    "idempotency_key_required",
+    "authorization_scopes",
+    "concurrency",
+    "max_response_bytes",
 }
 _ALLOWED_FIELDS = _REQUIRED_FIELDS | {"approval", "protocol_revisions", "extensions"}
 _APPROVAL_BINDS = {"principal", "capability", "target", "arguments-digest", "expires-at"}
@@ -34,36 +55,82 @@ _DEFAULT_TARGET_BINDING = {
     "silent_fallback": False,
 }
 _NON_TARGET_BINDING = {
-    "selector": "none", "revalidate_before_io": False, "silent_fallback": False,
+    "selector": "none",
+    "revalidate_before_io": False,
+    "silent_fallback": False,
 }
 
 _LEGACY_DESTRUCTIVE = {
-    "hikvision_restart_container", "iot_execute_command", "iot_restart_device",
-    "openhasp_factory_reset", "openhasp_ota_update", "openhasp_restart",
+    "hikvision_restart_container",
+    "iot_execute_command",
+    "iot_restart_device",
+    "openhasp_factory_reset",
+    "openhasp_ota_update",
+    "openhasp_restart",
 }
 _LEGACY_NONE_READ = {"describe_iot_capabilities", "iot_mqtt_build_command_topic"}
 _LEGACY_READ = {
-    "hikvision_check_vmd", "hikvision_container_logs", "hikvision_container_status",
-    "hikvision_device_info", "hikvision_get_alarm_server", "hikvision_get_event_config",
-    "hikvision_get_motion_config", "hikvision_isapi_health", "hikvision_pipeline_diagnose",
-    "hikvision_take_snapshot", "iot_check_device", "iot_discover_devices",
-    "iot_find_device_by_name", "iot_get_device_info", "iot_get_device_power",
-    "iot_get_full_info", "iot_get_wifi_config", "iot_list_devices", "iot_mqtt_get_state",
-    "iot_tuya_cloud_list", "iot_tuya_detect_version", "iot_tuya_get_dps",
-    "iot_tuya_monitor", "iot_tuya_scan_ports", "iot_tuya_verify_dps",
-    "openhasp_check_backlight", "openhasp_detect", "openhasp_download_file",
-    "openhasp_get_config", "openhasp_get_pages", "openhasp_health",
-    "openhasp_screenshot", "openhasp_status", "openhasp_validate_config",
+    "hikvision_check_vmd",
+    "hikvision_container_logs",
+    "hikvision_container_status",
+    "hikvision_device_info",
+    "hikvision_get_alarm_server",
+    "hikvision_get_event_config",
+    "hikvision_get_motion_config",
+    "hikvision_isapi_health",
+    "hikvision_pipeline_diagnose",
+    "hikvision_take_snapshot",
+    "iot_check_device",
+    "iot_discover_devices",
+    "iot_find_device_by_name",
+    "iot_get_device_info",
+    "iot_get_device_power",
+    "iot_get_full_info",
+    "iot_get_wifi_config",
+    "iot_list_devices",
+    "iot_mqtt_get_state",
+    "iot_tuya_cloud_list",
+    "iot_tuya_detect_version",
+    "iot_tuya_get_dps",
+    "iot_tuya_monitor",
+    "iot_tuya_scan_ports",
+    "iot_tuya_verify_dps",
+    "openhasp_check_backlight",
+    "openhasp_detect",
+    "openhasp_download_file",
+    "openhasp_get_config",
+    "openhasp_get_pages",
+    "openhasp_health",
+    "openhasp_screenshot",
+    "openhasp_status",
+    "openhasp_validate_config",
 }
 _LEGACY_WRITE = {
-    "hikvision_open_gate", "hikvision_set_motion_detection", "hikvision_snapshot_to_file",
-    "iot_configure_mqtt", "iot_mqtt_publish", "iot_set_brightness", "iot_set_flags",
-    "iot_set_friendly_name", "iot_set_gpio", "iot_set_name", "iot_set_power",
-    "iot_set_startup_command", "iot_start_ha_discovery", "iot_tuya_cloud_control",
-    "iot_tuya_cloud_refresh_keys", "iot_tuya_remove", "iot_tuya_set_dp",
-    "openhasp_backlight_set", "openhasp_config_set", "openhasp_hardware_test",
-    "openhasp_idle_reset", "openhasp_jsonl_send", "openhasp_page_set",
-    "openhasp_telnet", "openhasp_upload_file",
+    "hikvision_open_gate",
+    "hikvision_set_motion_detection",
+    "hikvision_snapshot_to_file",
+    "iot_configure_mqtt",
+    "iot_mqtt_publish",
+    "iot_set_brightness",
+    "iot_set_flags",
+    "iot_set_friendly_name",
+    "iot_set_gpio",
+    "iot_set_name",
+    "iot_set_power",
+    "iot_set_startup_command",
+    "iot_start_ha_discovery",
+    "iot_tuya_cloud_control",
+    "iot_tuya_cloud_refresh_keys",
+    "iot_tuya_remove",
+    "iot_tuya_set_dp",
+    "openhasp_backlight_set",
+    "openhasp_config_set",
+    "openhasp_hardware_test",
+    "openhasp_idle_reset",
+    "openhasp_jsonl_send",
+    "openhasp_page_set",
+    "openhasp_telnet",
+    "openhasp_upload_file",
 }
 _REVIEWED_LEGACY = _LEGACY_DESTRUCTIVE | _LEGACY_NONE_READ | _LEGACY_READ | _LEGACY_WRITE
 _MOCK_CLASSIFICATION = {
@@ -73,26 +140,49 @@ _MOCK_CLASSIFICATION = {
 }
 
 _NON_TARGET_BOUND_CAPABILITIES = {
-    "describe_iot_capabilities", "iot_list_devices", "iot_find_device_by_name",
-    "iot_mqtt_get_state", "iot_mqtt_build_command_topic", "iot_tuya_cloud_list",
-    "iot_tuya_scan_ports", "hikvision_take_snapshot", "hikvision_device_info",
-    "hikvision_get_motion_config", "hikvision_get_event_config", "hikvision_get_alarm_server",
+    "describe_iot_capabilities",
+    "iot_list_devices",
+    "iot_find_device_by_name",
+    "iot_mqtt_get_state",
+    "iot_mqtt_build_command_topic",
+    "iot_tuya_cloud_list",
+    "iot_tuya_scan_ports",
+    "hikvision_take_snapshot",
+    "hikvision_device_info",
+    "hikvision_get_motion_config",
+    "hikvision_get_event_config",
+    "hikvision_get_alarm_server",
 }
 _DANGEROUS_NAMES = {
-    "iot_execute_command", "openhasp_ota_update", "openhasp_factory_reset",
-    "openhasp_hardware_test", "hikvision_open_gate", "hikvision_snapshot_to_file",
-    "iot_set_flags", "iot_set_gpio", "iot_set_startup_command", "iot_tuya_set_dp",
+    "iot_execute_command",
+    "openhasp_ota_update",
+    "openhasp_factory_reset",
+    "openhasp_hardware_test",
+    "hikvision_open_gate",
+    "hikvision_snapshot_to_file",
+    "iot_set_flags",
+    "iot_set_gpio",
+    "iot_set_startup_command",
+    "iot_tuya_set_dp",
     "iot_tuya_cloud_refresh_keys",
 }
 _PRIVILEGED_NAMES = {
-    "hikvision_container_status", "hikvision_container_logs", "hikvision_check_vmd",
-    "hikvision_restart_container", "hikvision_isapi_health", "hikvision_pipeline_diagnose",
+    "hikvision_container_status",
+    "hikvision_container_logs",
+    "hikvision_check_vmd",
+    "hikvision_restart_container",
+    "hikvision_isapi_health",
+    "hikvision_pipeline_diagnose",
 }
 _CONFIDENTIALITY_OVERRIDES = {
-    "hikvision_take_snapshot": "personal", "hikvision_snapshot_to_file": "personal",
-    "hikvision_container_logs": "sensitive", "hikvision_get_alarm_server": "sensitive",
-    "openhasp_screenshot": "personal", "iot_tuya_cloud_refresh_keys": "credential",
-    "iot_configure_mqtt": "credential", "mock_capture_snapshot": "personal",
+    "hikvision_take_snapshot": "personal",
+    "hikvision_snapshot_to_file": "personal",
+    "hikvision_container_logs": "sensitive",
+    "hikvision_get_alarm_server": "sensitive",
+    "openhasp_screenshot": "personal",
+    "iot_tuya_cloud_refresh_keys": "credential",
+    "iot_configure_mqtt": "credential",
+    "mock_capture_snapshot": "personal",
 }
 _EXPLICIT_SCOPE_OVERRIDES: dict[str, tuple[str, ...]] = {
     "mock_get_state": ("devices:read",),
@@ -246,8 +336,10 @@ def _authorization_scopes(
         raise ManifestError(f"{name}: scopes require reviewed capability classification")
     declared = raw.get("authorization_scopes")
     if declared is not None:
-        if not isinstance(declared, list | tuple) or not declared or not all(
-            isinstance(item, str) and item for item in declared
+        if (
+            not isinstance(declared, list | tuple)
+            or not declared
+            or not all(isinstance(item, str) and item for item in declared)
         ):
             raise ManifestError(f"{name}: invalid authorization_scopes")
         return sorted(set(declared))
@@ -298,8 +390,10 @@ def _legacy_lifecycle(name: str, raw: Mapping[str, Any], operation_kind: str) ->
     lifecycle = "deprecated" if raw_state == "deprecated" else "active"
     legacy_mutation = operation_kind != "read" and not name.startswith("mock_")
     forced_inactive = (
-        name in _DANGEROUS_NAMES or name in _PRIVILEGED_NAMES
-        or name.startswith("openhasp_") or legacy_mutation
+        name in _DANGEROUS_NAMES
+        or name in _PRIVILEGED_NAMES
+        or name.startswith("openhasp_")
+        or legacy_mutation
     )
     if raw_state in {"disabled", "inactive"} or forced_inactive:
         lifecycle = "inactive"
@@ -308,8 +402,10 @@ def _legacy_lifecycle(name: str, raw: Mapping[str, Any], operation_kind: str) ->
 
 def _approval_policy() -> dict[str, Any]:
     return {
-        "enforcement": "server-side", "record_required": True,
-        "record_ttl_seconds": 300, "binds": sorted(_APPROVAL_BINDS),
+        "enforcement": "server-side",
+        "record_required": True,
+        "record_ttl_seconds": 300,
+        "binds": sorted(_APPROVAL_BINDS),
     }
 
 
@@ -324,14 +420,10 @@ def _canonical_manifest(name: str, raw: Mapping[str, Any]) -> dict[str, Any]:
     is_mock = name.startswith("mock_")
     retryable = bool(raw.get("retryable", False)) if is_mock and operation_kind != "read" else False
     idempotent = (
-        bool(raw.get("idempotent", False))
-        if is_mock and operation_kind != "read"
-        else False
+        bool(raw.get("idempotent", False)) if is_mock and operation_kind != "read" else False
     )
     reversible = (
-        bool(raw.get("reversible", False))
-        if is_mock and operation_kind != "read"
-        else False
+        bool(raw.get("reversible", False)) if is_mock and operation_kind != "read" else False
     )
     if active_state != "active":
         retryable = False
@@ -445,9 +537,7 @@ def validate_manifest(manifest: Mapping[str, Any]) -> None:
         value = concurrency.get(optional)
         minimum = 0 if optional == "queue_limit" else 1
         if value is not None and (
-            not isinstance(value, int)
-            or isinstance(value, bool)
-            or value < minimum
+            not isinstance(value, int) or isinstance(value, bool) or value < minimum
         ):
             raise ManifestError(f"concurrency.{optional} is outside canonical bounds")
     maximum = manifest["max_response_bytes"]

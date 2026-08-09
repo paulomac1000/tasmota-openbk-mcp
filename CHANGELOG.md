@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.7.0] — 2026-08-09
+
+### Added
+- **ai-skills compliance migration completed and verified against real hardware.** This branch adopts the `mcp-server-architect` 1.2.0 contract from the `ai-skills` `fix/unified-contract-release-hardening` revision and is now tested end-to-end: full local gate (865 tests), exact-wheel install, real stdio and Streamable HTTP probes, a locally built Docker image, and a live deployment in the `ha-mcp-stack` replacing the previous v1.6.0 container.
+
+### Fixed
+- **FastMCP 3.4.6 API migration**: `stateless_http`/`json_response` moved from the `FastMCP()` constructor to `http_app()`; the `/ready` probe now uses `list_tools(run_middleware=False)` and `list_resource_templates(run_middleware=False)`; `mcp.get_tools()` replaced with the 3.4.6 `list_tools()` API.
+- **Legacy tool output schemas**: legacy tools annotated `-> str` for JSON envelopes now register with `output_schema=None`, so the compatibility wrapper can return typed data that passes official-client schema validation (previously every real-device call failed client-side validation).
+- **Mock concurrency contract**: mock manifests declared inconsistent per-target concurrency limits (4 vs 1 on the same target key), which made concurrent calls fail with "concurrency contract changed"; unified to limit 1 to match the real manifests.
+- **Readiness endpoint**: `registered_tools` was always 0 (auth middleware filtered the probe); now bypasses client-auth filtering so operator health checks observe the full catalog.
+- **Docker build pipeline**: corrected the pinned `python:3.13.5-slim` base-image digest (was invalid), fixed `COPY dist/*.whl` so the wheel lands in a directory (wildcard destination), and removed `dist/` from `.dockerignore` so the exact wheel is present in the build context.
+- **Device data path**: `tools/iot_discovery.py` now honors `IOT_DATA_PATH` instead of deriving `data/` from the source-tree location, so the wheel-installed container reads the mounted `/app/data/discovered_devices.json` (previously `Permission denied` in the container).
+- **Hikvision motion config parser**: `columnGranularity`/`rowGranularity` may be a plain integer (`22`) on real devices, not always `22x22`; the parser no longer crashes and the mock now uses the real payload shape.
+- **Test isolation**: removed the stale fastmcp MagicMock injection in `tests/unit/conftest.py` (fastmcp 2.x-era hack that poisoned in-memory fastmcp tests), restored `_find_device_by_identifier` after `install_legacy_safety` in compliance tests, and prevented the container-only `IOT_DATA_PATH=/app` value from leaking into local test runs.
+- **Stale tests aligned with the migrated implementation**: `test_mock_runtime` (new `run_mock_self_test` contract), `test_fastmcp_protocol`/`test_server_api` (real stdio subprocess instead of in-memory `Client(mcp)`), `test_real_transports` (corrected exception assertion + generous startup wait), `test_registration_coverage` (Docker-gated subset), `test_real_tools` (accepts OpenBK devices, which dominate this network), `test_policy`/`test_canonical_contract` (reviewed manifest classification), `test_release_and_image_contract` (new Dockerfile layout).
+- **Quality gates**: full `ruff check .` and `ruff format` clean (256 errors fixed), `mypy local_home_devices_mcp` clean (66 errors fixed; documented per-module overrides for the stub-less tinytuya/defusedxml/paho adapters), `compileall` clean, `bandit -r local_home_devices_mcp tools -ll` reports no Medium/High issues.
+
+### Changed
+- `pyproject.toml` version pinned to `1.7.0` (was `2.0.0` on this branch).
+- `mock_runtime.run_mock_self_test(settings)` extracted as the single self-test implementation shared by `server.py --mock-self-test` and integration tests.
+- `.gitignore` restores `.omo/` and ignores the CI-generated exact-artifact outputs (`requirements.lock`, `wheelhouse/`, `locks/`).
+
+### Deployment
+- `ha-mcp-stack` service `local-home-devices-mcp` upgraded to the locally built `local-home-devices-mcp:agent-refactor` image (Streamable HTTP on 9102, loopback bind, scoped static tokens, no Docker-socket mount); container reports `status: ready`, 61 registered tools, 68 governed components, and serves 47 real discovered devices (OpenBK/Tasmota/Tuya/OpenHASP) with working device info, WiFi config, and power reads through the official MCP client.
+
 ## [1.6.0] — 2026-06-07
 
 ### Added

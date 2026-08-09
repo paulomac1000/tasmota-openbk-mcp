@@ -6,6 +6,7 @@ Local LAN control via tinytuya (encrypted TCP/UDP) with cloud API fallback.
 Supports WiFi-connected devices, BT Gateway sub-devices, and offline devices.
 """
 
+import contextlib
 import json
 import os
 import socket
@@ -28,18 +29,18 @@ from tools.constants import (
 from tools.validators import ValidationError
 
 __all__ = [
-    "register_iot_tuya_tools",
-    "_tuya_cloud_list",
-    "_tuya_status",
-    "_tuya_set_value",
-    "_tuya_detect_version",
-    "_tuya_verify_dps",
-    "_tuya_scan_ports",
-    "_tuya_cloud_refresh_keys",
-    "_load_tuya_devices",
-    "_save_tuya_devices",
     "_get_tuya_cloud",
     "_get_tuya_local",
+    "_load_tuya_devices",
+    "_save_tuya_devices",
+    "_tuya_cloud_list",
+    "_tuya_cloud_refresh_keys",
+    "_tuya_detect_version",
+    "_tuya_scan_ports",
+    "_tuya_set_value",
+    "_tuya_status",
+    "_tuya_verify_dps",
+    "register_iot_tuya_tools",
 ]
 
 # =============================================================================
@@ -283,14 +284,14 @@ def _find_tuya_in_cache(identifier: str) -> dict[str, Any] | None:
     if identifier in devices:
         return devices[identifier]
 
-    for did, entry in devices.items():
+    for _did, entry in devices.items():
         if entry.get("ip") == identifier:
             return entry
         name = entry.get("name", "")
         if name and name.lower() == identifier.lower():
             return entry
 
-    for did, entry in devices.items():
+    for _did, entry in devices.items():
         name = entry.get("name", "")
         if name and identifier.lower() in name.lower() and len(identifier) >= 3:
             return entry
@@ -345,10 +346,8 @@ def _tuya_cloud_refresh_keys() -> str:
 
         online = False
         if did:
-            try:
+            with contextlib.suppress(Exception):
                 online = bool(cloud.getconnectstatus(did))
-            except Exception:
-                pass
 
         entry: dict[str, Any] = {
             "device_id": did,
@@ -428,10 +427,8 @@ def _tuya_cloud_list() -> str:
         did = dev.get("id", "")
         online = False
         if did:
-            try:
+            with contextlib.suppress(Exception):
                 online = bool(cloud.getconnectstatus(did))
-            except Exception:
-                pass
         device_list.append(
             {
                 "device_id": did,
@@ -717,7 +714,7 @@ def _tuya_detect_version(identifier: str) -> str:
             suggestion="Check device online, correct local_key, close Tuya app.",
         )
 
-    best = list(results.values())[0]
+    best = next(iter(results.values()))
     cache = _load_tuya_devices()
     if did in cache.get("devices", {}):
         cache["devices"][did]["version"] = best["version"]
@@ -1081,10 +1078,8 @@ def _tuya_monitor(identifier: str, duration_seconds: int = 30) -> str:
         except Exception:
             time.sleep(0.5)
 
-    try:
+    with contextlib.suppress(Exception):
         d.close()
-    except Exception:
-        pass
 
     return _success_response(
         {

@@ -5,6 +5,7 @@ IoT MQTT Integration Tools
 Interact with IoT devices via MQTT broker.
 """
 
+import contextlib
 import json
 import time
 from typing import Any
@@ -23,7 +24,7 @@ from tools.constants import (
 )
 from tools.validators import ValidationError, validate_required_string
 
-__all__ = ["register_iot_mqtt_tools", "_get_mqtt_client", "_mqtt_publish"]
+__all__ = ["_get_mqtt_client", "_mqtt_publish", "register_iot_mqtt_tools"]
 
 
 def _get_mqtt_client() -> Any:
@@ -37,8 +38,8 @@ def _get_mqtt_client() -> Any:
 
         try:
             # paho-mqtt >= 2.0 requires callback_api_version
-            CallbackAPIVersion = getattr(mqtt, "CallbackAPIVersion")
-            client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION1)  # type: ignore[call-arg]
+            CallbackAPIVersion = mqtt.CallbackAPIVersion  # type: ignore[attr-defined]
+            client = mqtt.Client(callback_api_version=CallbackAPIVersion.VERSION1)
         except AttributeError:
             # paho-mqtt < 2.0
             client = mqtt.Client()
@@ -136,14 +137,10 @@ def _mqtt_get_state(topic_prefix: str, timeout_seconds: int = 10) -> str:
     except Exception as exc:
         return _error_response_extended(code="INTERNAL_ERROR", message=str(exc))
     finally:
-        try:
+        with contextlib.suppress(Exception):
             client.loop_stop()
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             client.disconnect()
-        except Exception:
-            pass
 
     if not received_messages:
         # Check if device has any active GPIO channels

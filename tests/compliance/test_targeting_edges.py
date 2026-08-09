@@ -91,9 +91,7 @@ def test_fingerprint_target_id_and_revalidation(tmp_path: Path):
     generated = device(target_id="")
     generated_id = target_id_for(generated)
     assert generated_id.startswith("dev_")
-    assert target_id_for(
-        device(target_id="", name="Renamed Light", type="openbk")
-    ) == generated_id
+    assert target_id_for(device(target_id="", name="Renamed Light", type="openbk")) == generated_id
     with pytest.raises(TargetError, match="stable identity"):
         target_id_for({"ip": "192.0.2.10", "name": "Name Only"})
 

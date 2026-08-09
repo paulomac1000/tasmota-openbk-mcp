@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import secrets
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import RLock
-from typing import Iterator
 
 
 class ArtifactError(ValueError):
@@ -45,10 +46,8 @@ class ArtifactStore:
         self.retention_seconds = retention_seconds
         self._lock = RLock()
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        try:
+        with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
-        except OSError:
-            pass
 
     def _paths(self, artifact_id: str) -> tuple[Path, Path]:
         if not artifact_id.startswith("art_") or not artifact_id[4:].isalnum():
@@ -133,10 +132,8 @@ class ArtifactStore:
                 expires_at=now + self.retention_seconds,
             )
             meta_path.write_text(json.dumps(asdict(metadata), sort_keys=True), encoding="utf-8")
-            try:
+            with contextlib.suppress(OSError):
                 os.chmod(meta_path, 0o600)
-            except OSError:
-                pass
             return metadata
 
     def metadata(self, artifact_id: str) -> ArtifactMetadata:

@@ -6,6 +6,7 @@ __pycache__
 .coverage
 coverage.xml
 build
-dist
 *.egg-info
 data
+# dist/, requirements.lock, and wheelhouse/ are exact-artifact inputs the
+# Dockerfile copies verbatim; they must remain in the build context.

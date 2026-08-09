@@ -28,17 +28,17 @@ from tools.validators import (
 )
 
 __all__ = [
-    "register_openhasp_tools",
-    "_openhasp_detect",
-    "_openhasp_status",
+    "_openhasp_backlight_set",
     "_openhasp_check_backlight",
+    "_openhasp_detect",
+    "_openhasp_download_file",
     "_openhasp_get_config",
     "_openhasp_get_pages",
-    "_openhasp_download_file",
-    "_openhasp_upload_file",
-    "_openhasp_send_command",
-    "_openhasp_backlight_set",
     "_openhasp_health",
+    "_openhasp_send_command",
+    "_openhasp_status",
+    "_openhasp_upload_file",
+    "register_openhasp_tools",
 ]
 
 DEFAULT_HOST = OPENHASP_DEFAULT_HOST

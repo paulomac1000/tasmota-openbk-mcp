@@ -56,8 +56,11 @@ def test_every_registered_tool_has_manifest_and_no_unexplained_orphans():
         register(registry)
     registered = set(registry.tools)
     manifests = set(TOOL_MANIFESTS)
+    # Every registered tool must have a manifest; the only tools that may be
+    # absent are the Docker-socket-gated ones, whose registration depends on
+    # whether /var/run/docker.sock exists in the test environment.
     assert registered <= manifests
-    assert manifests - registered == {
+    docker_gated = {
         "hikvision_check_vmd",
         "hikvision_container_logs",
         "hikvision_container_status",
@@ -65,6 +68,7 @@ def test_every_registered_tool_has_manifest_and_no_unexplained_orphans():
         "hikvision_pipeline_diagnose",
         "hikvision_restart_container",
     }
+    assert manifests - registered <= docker_gated
 
 
 def test_public_resource_inventory_has_one_manifest_per_component():
@@ -76,7 +80,6 @@ def test_public_resource_inventory_has_one_manifest_per_component():
     }
     resource_manifest_ids = set(PUBLIC_RESOURCE_COMPONENTS.values())
     assert resource_manifest_ids <= set(catalog)
-    assert {
-        catalog[item]["extensions"]["component_kind"]
-        for item in resource_manifest_ids
-    } == {"resource"}
+    assert {catalog[item]["extensions"]["component_kind"] for item in resource_manifest_ids} == {
+        "resource"
+    }

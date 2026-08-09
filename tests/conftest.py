@@ -17,6 +17,11 @@ for env_path in env_paths:
                     line = line.strip()
                     if line and not line.startswith("#") and "=" in line:
                         key, value = line.split("=", 1)
+                        # IOT_DATA_PATH is a container deployment setting
+                        # provided by docker-compose; the container-only /app
+                        # path must not leak into local test runs.
+                        if key.strip() == "IOT_DATA_PATH":
+                            continue
                         os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
         except Exception:
             pass
@@ -44,9 +49,7 @@ def pytest_collection_modifyitems(config, items):
             )
         ):
             item.add_marker(
-                pytest.mark.skip(
-                    reason="paho-mqtt is not installed in this isolated environment"
-                )
+                pytest.mark.skip(reason="paho-mqtt is not installed in this isolated environment")
             )
         if missing["tinytuya"] and any(
             name in nodeid
@@ -56,7 +59,5 @@ def pytest_collection_modifyitems(config, items):
             )
         ):
             item.add_marker(
-                pytest.mark.skip(
-                    reason="tinytuya is not installed in this isolated environment"
-                )
+                pytest.mark.skip(reason="tinytuya is not installed in this isolated environment")
             )

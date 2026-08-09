@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Mapping, MutableMapping
+from typing import Any
 
 from .config import Settings
 
@@ -68,11 +69,7 @@ def _header_bytes(headers: list[tuple[bytes, bytes]]) -> int:
 
 def _header_values(headers: list[tuple[bytes, bytes]], name: bytes) -> list[str]:
     wanted = name.lower()
-    return [
-        value.decode("latin-1")
-        for key, value in headers
-        if key.lower() == wanted
-    ]
+    return [value.decode("latin-1") for key, value in headers if key.lower() == wanted]
 
 
 def _host_matches(raw_host: str, allowed_hosts: tuple[str, ...]) -> bool:
@@ -227,16 +224,8 @@ class HttpBoundaryMiddleware:
         messages: list[ASGIMessage],
         send: Send,
     ) -> None:
-        starts = [
-            message
-            for message in messages
-            if message.get("type") == "http.response.start"
-        ]
-        bodies = [
-            message
-            for message in messages
-            if message.get("type") == "http.response.body"
-        ]
+        starts = [message for message in messages if message.get("type") == "http.response.start"]
+        bodies = [message for message in messages if message.get("type") == "http.response.body"]
         if len(starts) != 1:
             await _plain_response(send, 500, "invalid server response")
             return

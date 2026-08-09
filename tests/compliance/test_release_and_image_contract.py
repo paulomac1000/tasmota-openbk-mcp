@@ -46,7 +46,7 @@ def test_container_installs_only_from_hash_locked_wheelhouse() -> None:
     assert "--no-index" in dockerfile
     assert "--find-links=/tmp/wheelhouse" in dockerfile
     assert "--require-hashes" in dockerfile
-    assert "--no-deps /tmp/package.whl" in dockerfile
+    assert "--no-deps /tmp/package/*.whl" in dockerfile
 
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "scripts/lock_wheelhouse.py" in workflow

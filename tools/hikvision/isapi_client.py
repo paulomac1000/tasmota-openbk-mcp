@@ -235,10 +235,10 @@ class HikvisionISAPIClient:
                 grid_map = grid_map_el.text.strip()
             grid_rows = 18
             if rows_el is not None and rows_el.text:
-                grid_rows = int(rows_el.text.split("x")[0])
+                grid_rows = int(rows_el.text.strip().split("x")[0])
             grid_cols = 22
             if cols_el is not None and cols_el.text:
-                grid_cols = int(cols_el.text.split("x")[1])
+                grid_cols = int(cols_el.text.strip().split("x")[0])
             return {
                 "enabled": enabled_text.strip() == "true",
                 "sensitivity": sensitivity,

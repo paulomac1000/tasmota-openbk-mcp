@@ -6,10 +6,11 @@ import asyncio
 import inspect
 import time
 from collections import defaultdict, deque
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, TypeVar
+from typing import Any, TypeVar
 
 from .config import Settings
 from .manifests import (
@@ -123,7 +124,7 @@ class _PermitEntry:
 
 @dataclass(slots=True)
 class _PermitLease:
-    manager: "AsyncConcurrencyManager"
+    manager: AsyncConcurrencyManager
     key: str
     entry: _PermitEntry
     released: bool = False
@@ -214,9 +215,7 @@ class OperationGate:
     ) -> None:
         manifest = self.manifest(capability_name)
         if capability_name == "iot_execute_command" and "force" in arguments:
-            raise PolicyError(
-                "model input cannot override dangerous-operation policy"
-            )
+            raise PolicyError("model input cannot override dangerous-operation policy")
         if not is_runtime_active(manifest):
             raise CapabilityUnavailable(
                 f"{capability_name} is {manifest['active_state']} "
@@ -246,9 +245,7 @@ class OperationGate:
             capability_name == "iot_set_power"
             and str(arguments.get("state", "")).upper() == "TOGGLE"
         ):
-            raise PolicyError(
-                "TOGGLE is non-idempotent; request explicit ON or OFF"
-            )
+            raise PolicyError("TOGGLE is non-idempotent; request explicit ON or OFF")
         if "timeout_seconds" in arguments:
             maximum = manifest_timeout_seconds(manifest)
             try:
@@ -256,9 +253,7 @@ class OperationGate:
             except (TypeError, ValueError) as exc:
                 raise PolicyError("timeout_seconds must be numeric") from exc
             if requested <= 0 or requested > maximum:
-                raise PolicyError(
-                    f"timeout_seconds must be between 0 and {maximum:g}"
-                )
+                raise PolicyError(f"timeout_seconds must be between 0 and {maximum:g}")
 
         for key in ("target_id", "identifier", "ip", "ip_address"):
             value = arguments.get(key)
@@ -272,8 +267,7 @@ class OperationGate:
                 continue
             if validated and not self.settings.allow_direct_ip_targets:
                 raise PolicyError(
-                    "literal IP targets are disabled; use an exact target_id "
-                    "or device name"
+                    "literal IP targets are disabled; use an exact target_id or device name"
                 )
 
     @staticmethod
@@ -290,18 +284,12 @@ class OperationGate:
         principal: Principal,
     ) -> None:
         """Reject selectors provably outside the caller namespace before resolution."""
-        if (
-            selector is None
-            or "devices:admin" in principal.scopes
-            or principal.target_ids is None
-        ):
+        if selector is None or "devices:admin" in principal.scopes or principal.target_ids is None:
             return
         normalized = normalize_selector(selector)
         allowed = {normalize_selector(item) for item in principal.target_ids}
         if normalized.startswith("dev_") and normalized not in allowed:
-            raise PolicyError(
-                f"principal is not authorized for target selector: {selector}"
-            )
+            raise PolicyError(f"principal is not authorized for target selector: {selector}")
 
     async def _resolve_target(
         self,
@@ -313,9 +301,7 @@ class OperationGate:
             return None
         self.authorize_selector(selector, principal)
         if self.target_resolver is None:
-            raise PolicyError(
-                "target resolver is unavailable for a target-bearing capability"
-            )
+            raise PolicyError("target resolver is unavailable for a target-bearing capability")
         allowed = None if "devices:admin" in principal.scopes else principal.target_ids
         return await self.target_resolver.resolve(
             selector,
@@ -329,13 +315,8 @@ class OperationGate:
     ) -> None:
         if target is None or "devices:admin" in principal.scopes:
             return
-        if (
-            principal.target_ids is not None
-            and target.target_id not in principal.target_ids
-        ):
-            raise PolicyError(
-                f"principal is not authorized for target: {target.target_id}"
-            )
+        if principal.target_ids is not None and target.target_id not in principal.target_ids:
+            raise PolicyError(f"principal is not authorized for target: {target.target_id}")
 
     @staticmethod
     def _concurrency_key(
@@ -359,16 +340,12 @@ class OperationGate:
             return f"target:{target.target_id}"
         if scope == "principal-target":
             if target is None:
-                raise PolicyError(
-                    "principal-target concurrency requires a bound target"
-                )
+                raise PolicyError("principal-target concurrency requires a bound target")
             return f"principal-target:{principal.subject}:{target.target_id}"
 
         extensions = manifest.get("extensions")
         key_argument = (
-            extensions.get("concurrency_key_argument")
-            if isinstance(extensions, Mapping)
-            else None
+            extensions.get("concurrency_key_argument") if isinstance(extensions, Mapping) else None
         )
         if scope in {"credential", "resource", "custom"}:
             if not isinstance(key_argument, str) or not key_argument:
@@ -377,9 +354,7 @@ class OperationGate:
                 )
             value = arguments.get(key_argument)
             if not isinstance(value, str | int) or str(value) == "":
-                raise PolicyError(
-                    f"missing concurrency key argument: {key_argument}"
-                )
+                raise PolicyError(f"missing concurrency key argument: {key_argument}")
             return f"{scope}:{value}"
         raise PolicyError(f"unsupported concurrency scope: {scope}")
 
@@ -535,6 +510,4 @@ class OperationGate:
                     principal,
                 )
             )
-        raise RuntimeError(
-            "invoke() cannot be used in an active event loop; use invoke_async()"
-        )
+        raise RuntimeError("invoke() cannot be used in an active event loop; use invoke_async()")

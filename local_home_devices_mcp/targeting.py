@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import ipaddress
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Protocol
+from typing import Any, Protocol
 
 from .config import Settings
 
@@ -57,9 +58,7 @@ def _normalized_identity_parts(device: Mapping[str, Any]) -> list[str]:
         if key == "mac":
             compact = re.sub(r"[^0-9A-Fa-f]", "", value).lower()
             if len(compact) != 12:
-                raise TargetError(
-                    "device MAC address is not a stable 48-bit identifier"
-                )
+                raise TargetError("device MAC address is not a stable 48-bit identifier")
             value = compact
         else:
             value = value.casefold()
@@ -87,13 +86,9 @@ def validate_address(address: str, settings: Settings) -> str:
     if not isinstance(parsed, ipaddress.IPv4Address):
         raise TargetError("only IPv4 device targets are supported")
     if parsed.is_multicast or parsed.is_unspecified or parsed.is_loopback:
-        raise TargetNotAuthorized(
-            f"target address {parsed} is not a device address"
-        )
+        raise TargetNotAuthorized(f"target address {parsed} is not a device address")
     if not any(parsed in network for network in settings.allowed_networks):
-        raise TargetNotAuthorized(
-            f"target address {parsed} is outside allowed networks"
-        )
+        raise TargetNotAuthorized(f"target address {parsed} is outside allowed networks")
     return str(parsed)
 
 
@@ -105,7 +100,7 @@ def normalize_selector(selector: str) -> str:
         return str(ipaddress.ip_address(value))
     except ValueError:
         if not _SAFE_NAME.fullmatch(value):
-            raise TargetError("target selector contains unsupported characters")
+            raise TargetError("target selector contains unsupported characters") from None
         return value.casefold()
 
 
@@ -119,11 +114,7 @@ def resolve_exact_target(
     normalized = normalize_selector(selector)
     records = list(devices)
     if allowed_target_ids is not None:
-        records = [
-            record
-            for record in records
-            if target_id_for(record) in allowed_target_ids
-        ]
+        records = [record for record in records if target_id_for(record) in allowed_target_ids]
 
     try:
         parsed_selector = ipaddress.ip_address(normalized)
@@ -180,8 +171,5 @@ def revalidate_binding(
     address = validate_address(str(current.get("ip", "")), settings)
     if address != bound.address:
         raise TargetNotAuthorized("target address changed after authorization")
-    if (
-        target_id_for(current) != bound.target_id
-        or _fingerprint(current) != bound.fingerprint
-    ):
+    if target_id_for(current) != bound.target_id or _fingerprint(current) != bound.fingerprint:
         raise TargetNotAuthorized("target identity changed after authorization")

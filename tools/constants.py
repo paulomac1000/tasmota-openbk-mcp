@@ -142,7 +142,8 @@ _SENSITIVE_RESPONSE_FIELDS = {
 # IP redaction applies to LOG output only. Device IP addresses are functional
 # payload for an IoT discovery server - an agent needs them to address devices in
 # follow-up calls - so they are intentionally NOT redacted from response payloads.
-_LOG_PATTERNS = _CREDENTIAL_PATTERNS + [
+_LOG_PATTERNS = [
+    *_CREDENTIAL_PATTERNS,
     (r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", "<IP_REDACTED>"),
 ]
 

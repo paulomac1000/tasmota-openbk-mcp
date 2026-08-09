@@ -19,6 +19,7 @@ def safe_iot_control(monkeypatch: pytest.MonkeyPatch):
     original_power = iot_control._set_power
     original_brightness = iot_control._set_brightness
     original_resolve = iot_discovery._resolve_ip
+    original_find = iot_discovery._find_device_by_identifier
     install_legacy_safety(load_settings())
     try:
         yield iot_control
@@ -26,6 +27,7 @@ def safe_iot_control(monkeypatch: pytest.MonkeyPatch):
         iot_control._set_power = original_power
         iot_control._set_brightness = original_brightness
         iot_discovery._resolve_ip = original_resolve
+        iot_discovery._find_device_by_identifier = original_find
 
 
 def test_tuya_toggle_is_rejected_not_mapped_to_off(safe_iot_control):

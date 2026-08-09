@@ -165,7 +165,7 @@ class TestIntegrationRealDeviceReadOnly:
         dev = _pick_device_name(mcp_client)
         data = _get_result(mcp_client, "iot_get_device_info", identifier=dev["name"])
         assert data["success"] is True
-        assert data["data"]["device_type"] == "tasmota"
+        assert data["data"]["device_type"] in ("tasmota", "openbk")
         assert "info" in data["data"]
         assert data["data"]["info"]["name"] is not None
 

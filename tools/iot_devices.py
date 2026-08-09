@@ -26,11 +26,11 @@ from tools.validators import (
 )
 
 __all__ = [
-    "register_iot_device_tools",
-    "_get_openbk_status",
-    "_get_tasmota_status",
     "_get_device_info",
     "_get_device_power",
+    "_get_openbk_status",
+    "_get_tasmota_status",
+    "register_iot_device_tools",
 ]
 
 

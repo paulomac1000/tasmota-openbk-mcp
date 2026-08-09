@@ -27,16 +27,16 @@ from tools.validators import (
 )
 
 __all__ = [
-    "register_iot_config_tools",
-    "_set_flags",
-    "_set_name",
     "_configure_mqtt",
-    "_set_gpio",
     "_execute_command",
-    "_start_ha_discovery",
     "_get_full_info",
-    "_set_startup_command",
+    "_set_flags",
     "_set_friendly_name",
+    "_set_gpio",
+    "_set_name",
+    "_set_startup_command",
+    "_start_ha_discovery",
+    "register_iot_config_tools",
 ]
 
 # --------------------------------------------------------------------------- #

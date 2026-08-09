@@ -35,7 +35,7 @@ async def test_legacy_registration_proxy_wraps_sync_and_async_tools():
         def __init__(self):
             self.tools = {}
 
-        def tool(self, function=None):
+        def tool(self, function=None, **kwargs):
             def register(candidate):
                 self.tools[candidate.__name__] = candidate
                 return candidate

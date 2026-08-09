@@ -75,7 +75,9 @@ def test_short_auth_token_is_rejected(monkeypatch: pytest.MonkeyPatch):
         load_settings()
 
 
-def test_external_auth_environment_does_not_bypass_missing_provider(monkeypatch: pytest.MonkeyPatch):
+def test_external_auth_environment_does_not_bypass_missing_provider(
+    monkeypatch: pytest.MonkeyPatch,
+):
     _clear_mcp_env(monkeypatch)
     monkeypatch.setenv("MCP_TRANSPORT", "http")
     monkeypatch.setenv("FASTMCP_SERVER_AUTH", "https://issuer.invalid")

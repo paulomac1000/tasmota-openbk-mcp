@@ -1,6 +1,6 @@
 """OpenHASP HTTP client for config, pages, file download/upload."""
 
-from typing import Any
+from typing import Any, ClassVar
 
 import requests
 
@@ -14,7 +14,7 @@ class OpenHASPHTTPClient:
     pages.jsonl counting, and file management.
     """
 
-    CONFIG_FILES = [
+    CONFIG_FILES: ClassVar[list[str]] = [
         "config.json",
         "pages.jsonl",
         "boot.cmd",

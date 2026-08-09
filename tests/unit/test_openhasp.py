@@ -316,13 +316,13 @@ class TestOpenHASPDiagnostics:
         from tools.openhasp.diagnostics import validate_config
 
         config = {"hasp": {}, "gui": {"bckl": 255, "idle1": 30}, "mqtt": {}}
-        is_valid, warnings = validate_config(config, 10)
+        is_valid, _warnings = validate_config(config, 10)
         assert is_valid is True
 
     def test_health_score_healthy(self):
         from tools.openhasp.diagnostics import health_score
 
-        score, level, issues = health_score(
+        score, level, _issues = health_score(
             {"tftDriver": "ST7796", "heapFree": 80000},
             objects_count=10,
             mqtt_responding=True,
@@ -334,7 +334,7 @@ class TestOpenHASPDiagnostics:
     def test_health_score_critical_tft_other(self):
         from tools.openhasp.diagnostics import health_score
 
-        score, level, issues = health_score(
+        score, level, _issues = health_score(
             {"tftDriver": "Other"},
             objects_count=1,
             mqtt_responding=False,

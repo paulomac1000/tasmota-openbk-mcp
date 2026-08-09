@@ -35,27 +35,29 @@ from tools.validators import validate_cidr
 # CACHE CONFIGURATION
 # =============================================================================
 
-DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data")
+DATA_DIR = os.getenv("IOT_DATA_PATH") or os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data"
+)
 CACHE_FILE = os.path.join(DATA_DIR, "discovered_devices.json")
 CACHE_TTL_SECONDS = 3600  # 1 hour
 _cache_lock = threading.Lock()
 
 __all__ = [
-    "register_iot_discovery_tools",
     "_detect_device_type",
-    "_probe_device_info",
-    "_scan_network",
-    "_load_cache",
-    "_save_cache",
-    "_get_cached_devices",
     "_find_device_by_identifier",
+    "_get_cached_devices",
+    "_load_cache",
+    "_probe_device_info",
     "_resolve_ip",
+    "_save_cache",
+    "_scan_network",
+    "register_iot_discovery_tools",
 ]
 
 
 def _ensure_data_dir() -> None:
-    """Create data directory if it does not exist."""
-    os.makedirs(DATA_DIR, exist_ok=True)
+    """Create the cache file's parent directory if it does not exist."""
+    os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
 
 
 def _load_cache() -> dict[str, Any]:

@@ -124,14 +124,14 @@ def validate_http_url(value: str | None, name: str) -> str:
         if not __import__("os").getenv("MCP_ALLOWED_FIRMWARE_HOSTS"):
             raise ValidationError(
                 f"{name} hostname must be allowlisted in MCP_ALLOWED_FIRMWARE_HOSTS"
-            )
+            ) from None
         allowed = {
             item.strip().casefold()
             for item in __import__("os").getenv("MCP_ALLOWED_FIRMWARE_HOSTS", "").split(",")
             if item.strip()
         }
         if parsed.hostname.casefold() not in allowed:
-            raise ValidationError(f"{name} hostname is not allowlisted")
+            raise ValidationError(f"{name} hostname is not allowlisted") from None
     else:
         if not host.is_private:
             raise ValidationError(f"{name} IP must be private or explicitly proxied")
