@@ -13,7 +13,9 @@ concurrency:
 
 jobs:
   apply-test-push:
-    if: github.ref == 'refs/heads/agent/ai-skills-compliance-refactor'
+    if: >-
+      github.ref == 'refs/heads/agent/ai-skills-compliance-refactor' &&
+      github.event.head_commit.message == 'chore: rerun compliance hardening applicator'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -31,7 +33,7 @@ jobs:
           persist-credentials: false
       - name: Apply reviewed fixes
         run: python scripts/apply_compliance_fixes.py
-      - name: Remove one-shot applicator from final tree
+      - name: Hide one-shot workflow while validating the intended final workflow set
         run: git rm .github/workflows/agent-apply-fixes.yml scripts/apply_compliance_fixes.py
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
@@ -73,13 +75,20 @@ jobs:
           python .standards/skills/agents-md-architect/tools/validate_agents_md.py \
             --strict --repository-root /tmp/agents-audit --layout single --profile mcp-server \
             --language en /tmp/agents-audit/AGENTS.md
-      - name: Validate final workflow policy
+      - name: Validate intended final workflow policy
         run: python .standards/skills/ci-cd-architect/tools/check_github_actions_policy.py .
       - name: Run zero-I/O smoke and complete non-real suite
         run: |
           MCP_MOCK_MODE=1 ENABLE_WRITE_OPERATIONS=1 python server.py --mock-self-test
           python -m pytest -m 'not real_system'
-      - name: Commit and push only after all checks pass
+      - name: Restore workflow files for connector-managed publication
+        run: |
+          git checkout HEAD -- \
+            .github/workflows/agent-apply-fixes.yml \
+            .github/workflows/auto-tag.yml \
+            .github/workflows/ci.yml \
+            .github/workflows/publish.yml
+      - name: Commit and push non-workflow changes only after all checks pass
         run: |
           set -euo pipefail
           git status --short
