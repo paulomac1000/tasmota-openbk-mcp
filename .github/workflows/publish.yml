@@ -198,7 +198,7 @@ jobs:
           echo "subject_name=$repository" >> "$GITHUB_OUTPUT"
           echo "digest=$EXPECTED_DIGEST" >> "$GITHUB_OUTPUT"
       - name: Attest promoted immutable image
-        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v3
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-name: ${{ steps.promote.outputs.subject_name }}
           subject-digest: ${{ steps.promote.outputs.digest }}
