@@ -29,7 +29,7 @@ class TestResponseHelpers:
         assert data["data"] == {"key": "value"}
         assert "_meta" in data
         assert "request_id" in data["_meta"]
-        assert data["_meta"]["tool_version"] == "1.6.0"
+        assert data["_meta"]["tool_version"] == "1.7.0"
 
     def test_success_response_with_list(self):
         result = _success_response([1, 2, 3])
@@ -80,7 +80,7 @@ class TestResponseHelpers:
         # correlates with the log lines for the same invocation.
         assert meta["request_id"] == rid
         assert len(meta["request_id"]) == 36  # UUID length
-        assert meta["tool_version"] == "1.6.0"
+        assert meta["tool_version"] == "1.7.0"
 
     def test_build_meta_with_extra(self):
         meta = _build_meta(cached=True, duration_ms=42)

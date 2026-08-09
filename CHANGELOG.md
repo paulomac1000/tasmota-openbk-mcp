@@ -20,6 +20,7 @@
 
 ### Changed
 - `pyproject.toml` version pinned to `1.7.0` (was `2.0.0` on this branch).
+- `TOOLS_VERSION` bumped from `1.6.0` to `1.7.0` (`tools/constants.py`) and `tools/__init__.py` `__version__` synced to `1.7.0`.
 - `mock_runtime.run_mock_self_test(settings)` extracted as the single self-test implementation shared by `server.py --mock-self-test` and integration tests.
 - `.gitignore` restores `.omo/` and ignores the CI-generated exact-artifact outputs (`requirements.lock`, `wheelhouse/`, `locks/`).
 
