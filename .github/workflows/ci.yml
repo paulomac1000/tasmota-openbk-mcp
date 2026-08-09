@@ -65,11 +65,14 @@ jobs:
         run: python .standards/skills/afds-doc-writer/validate.py README.md docs
       - name: Audit and validate AGENTS instructions
         run: |
+          rm -rf /tmp/agents-audit && mkdir -p /tmp/agents-audit
+          tar --exclude='./.standards' --exclude='./.git' --exclude='./.venv' \
+            -cf - . | tar -xf - -C /tmp/agents-audit
           python .standards/skills/agents-md-architect/tools/audit_agents_md.py \
-            --strict --layout single --profile mcp-server --language en .
+            --strict --layout single --profile mcp-server --language en /tmp/agents-audit
           python .standards/skills/agents-md-architect/tools/validate_agents_md.py \
-            --strict --repository-root . --layout single --profile mcp-server \
-            --language en AGENTS.md
+            --strict --repository-root /tmp/agents-audit --layout single --profile mcp-server \
+            --language en /tmp/agents-audit/AGENTS.md
       - name: Validate GitHub Actions policy
         run: python .standards/skills/ci-cd-architect/tools/check_github_actions_policy.py .
 
