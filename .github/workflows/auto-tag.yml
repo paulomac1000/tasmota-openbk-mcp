@@ -3,8 +3,8 @@ name: Validate release request
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: SemVer version without leading v
+      release_ref:
+        description: Existing v* tag or full 40-character commit SHA reachable from main
         required: true
         type: string
 
@@ -20,11 +20,28 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - name: Validate version only
+      - name: Check out history read-only
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable release selection
         env:
-          VERSION: ${{ inputs.version }}
-        run: '[[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]'
+          RELEASE_REF: ${{ inputs.release_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$RELEASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            SHA="$RELEASE_REF"
+          elif [[ "$RELEASE_REF" == v* ]]; then
+            git show-ref --verify --quiet "refs/tags/$RELEASE_REF"
+            SHA="$(git rev-parse "refs/tags/$RELEASE_REF^{commit}")"
+          else
+            echo "release_ref must be an existing v* tag or full SHA" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$SHA" origin/main
+          echo "Validated release candidate: $SHA"
       - name: Explain protected release flow
         run: |
-          echo "This workflow does not create tags or publish packages."
-          echo "Use the protected release workflow only after trusted CI succeeds."
+          echo "This workflow never tags or publishes."
+          echo "Run publish.yml only after exact-SHA CI and external acceptance evidence pass."
