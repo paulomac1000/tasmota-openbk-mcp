@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import time
-from collections import defaultdict, deque
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -63,6 +63,8 @@ class InvocationContext:
     principal: Principal
     request_id: str
     deadline: float
+    settings: Settings
+    operation_kind: str
     target: BoundTarget | None
     ownership: BackendOwnership = field(default_factory=BackendOwnership)
 
@@ -97,22 +99,55 @@ def _remaining(deadline: float) -> float:
 
 
 class AsyncSlidingWindowLimiter:
-    def __init__(self, limit: int = 60, window_seconds: float = 60.0) -> None:
+    def __init__(
+        self,
+        limit: int = 60,
+        window_seconds: float = 60.0,
+        max_principals: int = 4096,
+    ) -> None:
+        if limit < 1 or window_seconds <= 0 or max_principals < 1:
+            raise ValueError("rate limiter bounds must be positive")
         self.limit = limit
         self.window_seconds = window_seconds
-        self._events: dict[str, deque[float]] = defaultdict(deque)
+        self.max_principals = max_principals
+        self._events: dict[str, deque[float]] = {}
         self._lock = asyncio.Lock()
+        self._next_prune_at = 0.0
+
+    def _prune_locked(self, now: float, *, force: bool = False) -> None:
+        if not force and now < self._next_prune_at:
+            return
+        cutoff = now - self.window_seconds
+        for key in list(self._events):
+            events = self._events[key]
+            while events and events[0] <= cutoff:
+                events.popleft()
+            if not events:
+                del self._events[key]
+        self._next_prune_at = now + min(5.0, self.window_seconds / 4)
 
     async def check(self, key: str, now: float | None = None) -> None:
         now = time.monotonic() if now is None else now
         cutoff = now - self.window_seconds
         async with self._lock:
-            events = self._events[key]
+            self._prune_locked(now)
+            events = self._events.get(key)
+            if events is None:
+                if len(self._events) >= self.max_principals:
+                    self._prune_locked(now, force=True)
+                if len(self._events) >= self.max_principals:
+                    raise RateLimitExceeded("rate limiter principal capacity exceeded")
+                events = deque()
+                self._events[key] = events
             while events and events[0] <= cutoff:
                 events.popleft()
             if len(events) >= self.limit:
                 raise RateLimitExceeded("rate limit exceeded")
             events.append(now)
+
+    @property
+    def entry_count(self) -> int:
+        return len(self._events)
 
 
 @dataclass(slots=True)
@@ -192,11 +227,15 @@ class OperationGate:
         *,
         target_resolver: TargetResolver | None = None,
         rate_limit_per_minute: int = 60,
+        rate_limit_max_principals: int = 4096,
     ) -> None:
         self.settings = settings
         self.catalog = normalize_catalog(raw_catalog)
         self.target_resolver = target_resolver
-        self.rate_limiter = AsyncSlidingWindowLimiter(rate_limit_per_minute)
+        self.rate_limiter = AsyncSlidingWindowLimiter(
+            rate_limit_per_minute,
+            max_principals=rate_limit_max_principals,
+        )
         self.concurrency = AsyncConcurrencyManager()
         self.locks = self.concurrency
         self._supervisors: set[asyncio.Task[None]] = set()
@@ -433,6 +472,8 @@ class OperationGate:
             principal=principal,
             request_id=f"req_{time.time_ns():x}",
             deadline=absolute_deadline,
+            settings=self.settings,
+            operation_kind=str(manifest["operation_kind"]),
             target=None,
         )
         token = _current_context.set(context)

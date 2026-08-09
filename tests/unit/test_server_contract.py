@@ -35,3 +35,10 @@ def test_fastmcp_security_floor_and_v3_visibility_api():
     assert 'mcp.disable(keys={f"tool:{name}"})' in composition
     assert "AuthMiddleware" in composition
     assert "remove_tool(" not in composition
+
+
+def test_major_version_and_ai_skills_diagnostic_pin():
+    project = Path("pyproject.toml").read_text(encoding="utf-8")
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert 'version = "2.0.0"' in project
+    assert "AI_SKILLS_REVISION: b54fc6b27ea80b36a70d5de73445970e17f55789" in workflow

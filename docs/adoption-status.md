@@ -5,75 +5,52 @@ type: reference
 status: evolving
 rigor: operational
 owners: [repository-maintainers]
-verification: Run the exact-revision CI workflow and create provider-backed assessment evidence only after independent review exists.
+verification: Run candidate-local diagnostics, then bind external provider evidence and an independent review to the exact immutable candidate SHA.
 ---
 
 # AI skills adoption status
 
 ## Answer
 
-This branch is a candidate adoption of `mcp-server-architect` version `1.2.0` from
-`ai-skills` revision `c6dc6b13b2dd40b6e087140cd071b45067d75b39`. It does not claim an
-approved maturity level before provider-backed CI evidence and independent review are bound to
-an immutable project revision.
+This branch is a candidate adoption of `mcp-server-architect` 1.2.0 from ai-skills revision `b54fc6b27ea80b36a70d5de73445970e17f55789`. The application package is 2.0.0 because the migration removes transports and changes public target-selection, response, and retry semantics.
 
-The project uses the independently distributed `fastmcp==3.4.6` package. The pinned `ai-skills`
-FastMCP profile has no verified baseline versions or repository-tested protocol revisions for
-that SDK family. Therefore `3.4.6` is a repo-local candidate lane backed by this repository's own
-tests; it is not presented as an `ai-skills`-verified FastMCP baseline.
+It does **not** claim an approved maturity level. The repository-controlled CI workflow is useful diagnostic evidence but cannot approve the same candidate tree that controls the verifier pin and workflow definition.
 
 ## Implemented controls
 
-- One FastMCP composition root and application-owned invocation kernel for public components.
-- Capability and selector-namespace authorization before target resolution, followed by exact
-  stable-target authorization and identity revalidation.
-- Official stdio and Streamable HTTP transports only.
-- Complete, conservative application-owned capability manifests that reject unknown or
-  unclassified legacy capabilities instead of defaulting them to read access.
-- One absolute request deadline propagated through resolution, concurrency admission,
-  revalidation, and backend execution.
-- Server-side scopes and operator gates independent from model arguments.
-- Principal-bound opaque artifact IDs and governed artifact-resource access.
-- Exact wheel-to-image promotion and digest-based release promotion.
-- AFDS-governed architecture, security, capability, migration, and operations documents.
+- One FastMCP composition root and one application-owned invocation kernel.
+- Capability and selector authorization before network-backed target resolution, followed by exact stable-target authorization and pre-I/O identity revalidation.
+- Official stdio and Streamable HTTP only.
+- Conservative canonical manifests; unclassified legacy capabilities fail closed.
+- Bounded HTTP admission, queue wait, ingress read, body size, header size, connection count, and response capture.
+- Bounded principal rate-limiter state.
+- Stable machine-readable public error codes with mutation-only unknown-outcome semantics.
+- Principal-owned artifacts with confined paths, integrity, retention, quota, and governed resource access.
+- Exact wheel/image CI plus quarantine-digest release promotion with no candidate execution in the protected publisher.
 
-## Local evidence
+## Candidate-local verification
 
 Run:
 
 ```bash
-.venv/bin/python server.py --mock-self-test
-.venv/bin/python -m pytest -m 'not real_system'
+MCP_MOCK_MODE=1 ENABLE_WRITE_OPERATIONS=1 python server.py --mock-self-test
+python -m pytest -m 'not real_system'
 ```
 
-The local isolated environment is used for every zero-I/O test available in the workspace.
-Hosted CI is authoritative for the pinned Ruff, mypy, Bandit, FastMCP client, exact-wheel,
-and container lanes and is **green on the current candidate revision** (`agent/ai-skills-compliance-refactor`
-at `e5f03ff`): the quality, test, exact-wheel, and container jobs all pass, and the produced
-wheel and image artifacts carry the exact tested revision digest.
+Hosted CI additionally executes Ruff, mypy, Bandit, capability-manifest validation, AFDS/AGENTS/workflow policy checks, exact-wheel installation, official-client stdio/HTTP probes, and the exact container artifact. Every source change invalidates previous exact-SHA CI evidence.
 
-## Pending evidence
+## Pending acceptance evidence
 
-A schema-valid `migration-assessment.yaml` is not treated as complete until its exact project
-revision, exact `ai-skills` revision, skill version, maturity/profile selection, provider-backed
-workflow evidence, artifact identities, and independent decision all refer to the same immutable
-candidate. Placeholder run IDs, digests, reviewers, or approval decisions are forbidden.
+Final approval requires all of the following to reference one immutable candidate SHA:
 
-The public pull request remains a draft until an independent review is bound to the exact
-candidate revision. Hosted CI checks are complete; the remaining blocker is that independent
-review, not a code defect.
-Real-device checks are separately enumerated in `tests/real_system_todos.py` and remain blocking
-for claims about physical target identity, ambiguous mutation outcomes, expected disconnects,
-and backend-specific compensation.
+- a schema-valid provider-backed migration/adoption assessment;
+- exact workflow/run and wheel/image identities;
+- acceptance validation from an immutable verifier outside the assessed candidate tree;
+- an independent reviewer who did not author the candidate or its evidence;
+- authorized real-system evidence for the physical-device cases listed in `tests/real_system_todos.py`.
+
+Release quarantine credentials and registry isolation are deployment-owner configuration and must be exercised before the first production 2.0.0 promotion.
 
 ## Failure and recovery
 
-If hosted conformance fails, keep the pull request in draft, leave unsafe adapters inactive, and
-fix the canonical implementation or test. Do not weaken the assessment, restore the REST bridge,
-or insert placeholder provider identities.
-
-## Verification
-
-The acceptance condition is a schema-valid provider-backed assessment referencing the exact
-candidate SHA, exact wheel and image digests, official-client transport results, and an
-independent review. Until then the repository describes itself as a candidate adoption only.
+Keep unsafe adapters inactive when any required evidence is missing. Do not weaken the assessment, restore the removed REST/SSE bridges, interpret an unassigned runner as success, or manufacture placeholder reviewer/run/digest identities.

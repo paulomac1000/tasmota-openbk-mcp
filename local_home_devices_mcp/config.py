@@ -85,6 +85,8 @@ class Settings:
     http_max_header_bytes: int = 32 * 1024
     http_max_connections: int = 64
     http_queue_limit: int = 32
+    http_queue_wait_ms: int = 1000
+    http_ingress_timeout_ms: int = 5000
 
     @property
     def is_loopback(self) -> bool:
@@ -385,6 +387,18 @@ def load_settings() -> Settings:
             32,
             minimum=0,
             maximum=4096,
+        ),
+        http_queue_wait_ms=_int(
+            "MCP_HTTP_QUEUE_WAIT_MS",
+            1000,
+            minimum=1,
+            maximum=60_000,
+        ),
+        http_ingress_timeout_ms=_int(
+            "MCP_HTTP_INGRESS_TIMEOUT_MS",
+            5000,
+            minimum=100,
+            maximum=60_000,
         ),
     )
     settings.validate()

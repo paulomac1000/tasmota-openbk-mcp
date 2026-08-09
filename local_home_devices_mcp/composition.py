@@ -26,13 +26,20 @@ from .manifests import (
     manifest_timeout_seconds,
 )
 from .mock_runtime import MockTargetResolver
-from .policy import OperationGate, PolicyError, Principal, current_context
+from .policy import (
+    CapabilityUnavailable,
+    OperationGate,
+    PolicyError,
+    Principal,
+    RateLimitExceeded,
+    current_context,
+)
 from .public_catalog import (
     PUBLIC_RESOURCE_COMPONENTS,
     build_public_catalog,
     component_kind,
 )
-from .targeting import TargetError
+from .targeting import AmbiguousTarget, TargetError, TargetNotAuthorized, TargetNotFound
 
 T = TypeVar("T")
 SUPPORTED_PROTOCOL_REVISIONS = ["2025-11-25"]
@@ -43,14 +50,39 @@ ADOPTION_PROFILES = [
 
 
 class PublicInvocationError(RuntimeError):
-    """Safe error crossing a public MCP component boundary."""
+    """Stable machine-readable error crossing a public MCP boundary."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+        unknown_outcome: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.unknown_outcome = unknown_outcome
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "retryable": self.retryable,
+            "unknown_outcome": self.unknown_outcome,
+        }
+
+    def __str__(self) -> str:
+        return json.dumps(self.payload(), sort_keys=True, separators=(",", ":"))
 
 
 def package_version() -> str:
     try:
         return version("local-home-devices-mcp")
     except PackageNotFoundError:
-        return "1.7.0"
+        return "2.0.0"
 
 
 def _build_auth(settings: Settings) -> Any | None:
@@ -97,21 +129,37 @@ def _principal_from_fastmcp(settings: Settings) -> Principal:
             )
         raise PolicyError("HTTP authentication is required")
 
-    claims = getattr(token, "claims", None) or {}
+    raw_claims = getattr(token, "claims", None) or {}
+    if not isinstance(raw_claims, Mapping):
+        raise PolicyError("HTTP authentication claims must be an object")
+    claims = raw_claims
     subject = str(
         getattr(token, "client_id", None)
         or claims.get("sub")
         or claims.get("client_id")
         or "authenticated"
     )
-    scopes = frozenset(str(item) for item in (getattr(token, "scopes", None) or []))
+    raw_scopes = getattr(token, "scopes", None) or []
+    if isinstance(raw_scopes, str) or not all(
+        isinstance(item, str) and item.strip() for item in raw_scopes
+    ):
+        raise PolicyError("HTTP authentication scopes are malformed")
+    scopes = frozenset(item.strip() for item in raw_scopes)
     raw_targets = claims.get("targets")
     if raw_targets is None or raw_targets == "*":
         target_ids = None
     elif isinstance(raw_targets, str):
-        target_ids = frozenset({raw_targets})
+        if not raw_targets.strip():
+            raise PolicyError("HTTP target claim must not be empty")
+        target_ids = frozenset({raw_targets.strip()})
+    elif isinstance(raw_targets, list | tuple | set | frozenset):
+        if not raw_targets or not all(
+            isinstance(item, str) and item.strip() and item != "*" for item in raw_targets
+        ):
+            raise PolicyError("HTTP target claim is malformed")
+        target_ids = frozenset(item.strip() for item in raw_targets)
     else:
-        target_ids = frozenset(str(item) for item in raw_targets)
+        raise PolicyError("HTTP target claim is malformed")
     return Principal(subject, scopes, "http", target_ids)
 
 
@@ -206,11 +254,13 @@ async def _invoke_public_component[T](
     principal: Principal,
     callback: Callable[[], Awaitable[T]],
 ) -> T:
-    """Run every public MCP component through the same governance kernel."""
+    """Run every public MCP component through one typed governance boundary."""
     manifest = gate.manifest(capability_name)
     maximum = effective_response_limit(manifest, settings)
     set_wire_response_limit(maximum)
     deadline = time.monotonic() + manifest_timeout_seconds(manifest)
+    operation_kind = str(manifest["operation_kind"])
+    execution_started = False
     try:
         async with gate.guard_async(
             capability_name,
@@ -218,35 +268,58 @@ async def _invoke_public_component[T](
             principal,
             deadline=deadline,
         ):
+            execution_started = True
             result = await callback()
-            # This catches oversized application values before adapter serialization.
-            # HttpBoundaryMiddleware independently enforces the actual final ASGI body.
             if encoded_response_bytes(result) > maximum:
-                raise PublicInvocationError(f"final response exceeds {maximum} bytes")
+                raise PublicInvocationError(
+                    "RESPONSE_TOO_LARGE",
+                    f"final response exceeds {maximum} bytes",
+                )
             return result
     except TimeoutError as exc:
-        raise PublicInvocationError(
-            "operation deadline exceeded; mutation outcome may be unknown "
-            "and requires reconciliation"
-        ) from exc
+        unknown = execution_started and operation_kind in {"write", "destructive"}
+        if unknown:
+            raise PublicInvocationError(
+                "UNKNOWN_OUTCOME",
+                "operation deadline exceeded after mutation execution started; "
+                "reconcile state before any retry",
+                unknown_outcome=True,
+            ) from exc
+        raise PublicInvocationError("DEADLINE_EXCEEDED", "operation deadline exceeded") from exc
     except LegacyToolFailure as exc:
-        raise PublicInvocationError(f"{exc.code}: {exc}") from exc
+        raise PublicInvocationError(exc.code, str(exc)) from exc
     except PublicInvocationError:
         raise
-    except (
-        PolicyError,
-        ManifestError,
-        TargetError,
-        ArtifactError,
-    ) as exc:
-        raise PublicInvocationError(str(exc)) from exc
+    except CapabilityUnavailable as exc:
+        raise PublicInvocationError("CAPABILITY_UNAVAILABLE", str(exc)) from exc
+    except RateLimitExceeded as exc:
+        raise PublicInvocationError("RATE_LIMITED", str(exc)) from exc
+    except TargetNotFound as exc:
+        raise PublicInvocationError("TARGET_NOT_FOUND", str(exc)) from exc
+    except AmbiguousTarget as exc:
+        raise PublicInvocationError("AMBIGUOUS_TARGET", str(exc)) from exc
+    except TargetNotAuthorized as exc:
+        raise PublicInvocationError("TARGET_NOT_AUTHORIZED", str(exc)) from exc
+    except TargetError as exc:
+        raise PublicInvocationError("INVALID_TARGET", str(exc)) from exc
+    except ArtifactError as exc:
+        raise PublicInvocationError("ARTIFACT_UNAVAILABLE", "artifact is unavailable") from exc
+    except PolicyError as exc:
+        raise PublicInvocationError("FORBIDDEN", str(exc)) from exc
+    except ManifestError as exc:
+        logging.getLogger(__name__).error(
+            "capability contract failed for %s: %s", capability_name, type(exc).__name__
+        )
+        raise PublicInvocationError(
+            "INTERNAL_CONTRACT_ERROR", "internal capability contract failure"
+        ) from exc
     except Exception as exc:
         logging.getLogger(__name__).error(
             "public component failed for %s: %s",
             capability_name,
             type(exc).__name__,
         )
-        raise PublicInvocationError("internal component failure") from exc
+        raise PublicInvocationError("INTERNAL", "internal component failure") from exc
 
 
 def _install_policy_middleware(
@@ -273,7 +346,7 @@ def _install_policy_middleware(
                 try:
                     return await call_next(context)
                 except ValidationError as exc:
-                    raise PublicInvocationError(str(exc)) from exc
+                    raise PublicInvocationError("INVALID_ARGUMENT", str(exc)) from exc
 
             try:
                 return await _invoke_public_component(
@@ -469,8 +542,8 @@ def build_server(
 
     @mcp.custom_route("/ready", methods=["GET"])
     async def ready(_request: Any) -> JSONResponse:
-        # Operator readiness probe: bypass client-auth filtering so a health
-        # check can observe every registered component, not just the caller's.
+        # Operator readiness bypasses caller filtering but includes mandatory
+        # local dependency state, not just registration counts.
         listed_tools = await mcp.list_tools(run_middleware=False)
         registered_tools = {str(getattr(tool, "name", tool)) for tool in listed_tools}
         active_tools = {
@@ -483,9 +556,14 @@ def build_server(
         registered_templates = {str(key) for key in templates}
         artifact_registered = any("artifact://" in item for item in registered_templates)
         resource_ok = artifact_registered and "artifact_read" in gate.catalog
-        status = (
-            "ready" if not unexpected_tools and not missing_tools and resource_ok else "not-ready"
+
+        resolver_report = await target_resolver.readiness()
+        artifact_report = artifact_store.readiness()
+        dependency_ok = (
+            resolver_report.get("status") == "ready" and artifact_report.get("status") == "ready"
         )
+        structural_ok = not unexpected_tools and not missing_tools and resource_ok
+        status = "ready" if structural_ok and dependency_ok else "not-ready"
         return JSONResponse(
             {
                 "status": status,
@@ -494,6 +572,10 @@ def build_server(
                 "unexpected_registered_tools": unexpected_tools,
                 "missing_active_tools": missing_tools,
                 "artifact_resource_governed": resource_ok,
+                "dependencies": {
+                    "target_registry": resolver_report,
+                    "artifact_store": artifact_report,
+                },
             },
             status_code=200 if status == "ready" else 503,
         )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import json
 import sys
@@ -269,8 +270,12 @@ async def test_capability_response_limit_is_enforced_at_mcp_boundary(
         return {"value": "x" * (40 * 1024)}
 
     invocation = mcp.middlewares[1]
-    with pytest.raises(FakeToolError, match="final response exceeds 32768 bytes"):
+    with pytest.raises(FakeToolError) as caught:
         await invocation.on_call_tool(context, call_next)
+    payload = json.loads(str(caught.value))
+    assert payload["code"] == "RESPONSE_TOO_LARGE"
+    assert payload["retryable"] is False
+    assert payload["unknown_outcome"] is False
 
 
 @pytest.mark.asyncio
@@ -337,3 +342,54 @@ async def test_readiness_rejects_missing_active_and_unexpected_tools(
     payload = json.loads((await mcp.routes["/ready"](None)).body)
     assert payload["missing_active_tools"] == []
     assert payload["unexpected_registered_tools"] == ["unclassified_tool"]
+
+
+@pytest.mark.asyncio
+async def test_mutation_timeout_is_machine_readable_unknown_outcome(
+    tmp_path: Path, fake_fastmcp: dict[str, Any]
+) -> None:
+    from local_home_devices_mcp.composition import build_server
+
+    _server, gate = build_server(settings(tmp_path))
+    mcp = FakeFastMCP.last
+    assert mcp is not None
+    gate.catalog["mock_set_power"]["extensions"]["timeout_ms"] = 10
+    context = SimpleNamespace(
+        message=SimpleNamespace(
+            name="mock_set_power",
+            arguments={"identifier": "dev_mock_light", "power": True},
+        )
+    )
+
+    async def call_next(_context: Any) -> dict[str, bool]:
+        await asyncio.sleep(0.05)
+        return {"power": True}
+
+    with pytest.raises(FakeToolError) as caught:
+        await mcp.middlewares[1].on_call_tool(context, call_next)
+    payload = json.loads(str(caught.value))
+    assert payload["code"] == "UNKNOWN_OUTCOME"
+    assert payload["unknown_outcome"] is True
+    assert payload["retryable"] is False
+
+
+@pytest.mark.asyncio
+async def test_readiness_fails_when_mandatory_dependency_is_unavailable(
+    tmp_path: Path, fake_fastmcp: dict[str, Any]
+) -> None:
+    from local_home_devices_mcp.composition import build_server
+
+    _server, gate = build_server(settings(tmp_path))
+    mcp = FakeFastMCP.last
+    assert mcp is not None
+
+    async def unavailable() -> dict[str, Any]:
+        return {"status": "unavailable", "reason": "test", "valid_targets": 0}
+
+    assert gate.target_resolver is not None
+    gate.target_resolver.readiness = unavailable  # type: ignore[method-assign]
+    response = await mcp.routes["/ready"](None)
+    payload = json.loads(response.body)
+    assert response.status_code == 503
+    assert payload["status"] == "not-ready"
+    assert payload["dependencies"]["target_registry"]["status"] == "unavailable"

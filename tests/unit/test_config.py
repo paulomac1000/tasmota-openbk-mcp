@@ -83,3 +83,12 @@ def test_external_auth_environment_does_not_bypass_missing_provider(
     monkeypatch.setenv("FASTMCP_SERVER_AUTH", "https://issuer.invalid")
     with pytest.raises(ValueError, match="HTTP transport requires"):
         load_settings()
+
+
+def test_http_queue_and_ingress_deadlines_are_configurable(monkeypatch: pytest.MonkeyPatch):
+    _clear_mcp_env(monkeypatch)
+    monkeypatch.setenv("MCP_HTTP_QUEUE_WAIT_MS", "250")
+    monkeypatch.setenv("MCP_HTTP_INGRESS_TIMEOUT_MS", "1500")
+    config = load_settings()
+    assert config.http_queue_wait_ms == 250
+    assert config.http_ingress_timeout_ms == 1500

@@ -7,6 +7,7 @@ import pytest
 from local_home_devices_mcp.config import Settings
 from local_home_devices_mcp.mock_runtime import MOCK_MANIFESTS, MockTargetResolver
 from local_home_devices_mcp.policy import (
+    AsyncSlidingWindowLimiter,
     OperationGate,
     PolicyError,
     Principal,
@@ -173,3 +174,15 @@ def test_hostname_in_ip_parameter_is_rejected():
     runtime = gate()
     with pytest.raises(TargetError, match="invalid IP address"):
         runtime.authorize("mock_get_state", {"ip_address": "localhost"}, READ)
+
+
+@pytest.mark.asyncio
+async def test_rate_limiter_principal_registry_is_bounded_and_expires() -> None:
+    limiter = AsyncSlidingWindowLimiter(limit=2, window_seconds=1.0, max_principals=2)
+    await limiter.check("alice", now=0.0)
+    await limiter.check("bob", now=0.0)
+    assert limiter.entry_count == 2
+    with pytest.raises(RateLimitExceeded, match="capacity"):
+        await limiter.check("charlie", now=0.1)
+    await limiter.check("charlie", now=2.0)
+    assert limiter.entry_count == 1

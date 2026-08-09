@@ -1,11 +1,11 @@
-"""Bounded ASGI boundary for Streamable HTTP transport."""
+"""Bounded ASGI boundary for stateless JSON Streamable HTTP transport."""
 
 from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from .config import Settings
@@ -43,7 +43,7 @@ class _Admission:
     def __post_init__(self) -> None:
         self.lock = asyncio.Lock()
 
-    async def acquire(self) -> bool:
+    async def acquire(self, timeout_seconds: float) -> bool:
         assert self.lock is not None
         async with self.lock:
             if not self.semaphore.locked():
@@ -53,7 +53,10 @@ class _Admission:
                 return False
             self.waiters += 1
         try:
-            await self.semaphore.acquire()
+            try:
+                await asyncio.wait_for(self.semaphore.acquire(), timeout=timeout_seconds)
+            except TimeoutError:
+                return False
             return True
         finally:
             async with self.lock:
@@ -74,7 +77,8 @@ def _header_values(headers: list[tuple[bytes, bytes]], name: bytes) -> list[str]
 
 def _host_matches(raw_host: str, allowed_hosts: tuple[str, ...]) -> bool:
     raw = raw_host.strip().lower().rstrip(".")
-    if raw in {item.lower().rstrip(".") for item in allowed_hosts}:
+    allowed = {item.lower().rstrip(".") for item in allowed_hosts}
+    if raw in allowed:
         return True
     if raw.startswith("["):
         closing = raw.find("]")
@@ -83,14 +87,10 @@ def _host_matches(raw_host: str, allowed_hosts: tuple[str, ...]) -> bool:
         host_only = raw.rsplit(":", 1)[0]
     else:
         host_only = raw
-    return host_only in {item.lower().rstrip(".") for item in allowed_hosts}
+    return host_only in allowed
 
 
-async def _plain_response(
-    send: Send,
-    status: int,
-    message: str,
-) -> None:
+async def _plain_response(send: Send, status: int, message: str) -> None:
     body = message.encode("utf-8")
     await send(
         {
@@ -115,7 +115,10 @@ async def _buffer_request(receive: Receive, maximum: int) -> bytes | None:
             return None
         if kind != "http.request":
             continue
-        body.extend(message.get("body", b""))
+        raw = message.get("body", b"")
+        if not isinstance(raw, bytes | bytearray):
+            raise ValueError("request body must be bytes")
+        body.extend(raw)
         if len(body) > maximum:
             raise ValueError("request body exceeds configured limit")
         if not message.get("more_body", False):
@@ -136,8 +139,88 @@ def _replay_receive(body: bytes) -> Receive:
     return receive
 
 
+@dataclass(slots=True)
+class _ResponseCapture:
+    """Bound response memory while withholding bytes until limits are proven."""
+
+    settings: Settings
+    start: ASGIMessage | None = None
+    body: bytearray = field(default_factory=bytearray)
+    error: str | None = None
+    saw_body: bool = False
+
+    async def send(self, message: ASGIMessage) -> None:
+        kind = message.get("type")
+        if kind == "http.response.start":
+            if self.start is not None:
+                self.error = "invalid server response"
+                return
+            headers = list(message.get("headers") or [])
+            if _header_bytes(headers) > self.settings.http_max_header_bytes:
+                self.error = "response headers exceed configured limit"
+                return
+            lengths = _header_values(headers, b"content-length")
+            if len(lengths) > 1:
+                self.error = "invalid server response"
+                return
+            if lengths:
+                try:
+                    declared = int(lengths[0])
+                except ValueError:
+                    self.error = "invalid server response"
+                    return
+                maximum = current_wire_response_limit(self.settings.max_response_bytes)
+                if declared < 0 or declared > maximum:
+                    self.error = "response exceeds configured wire limit"
+                    return
+            self.start = dict(message)
+            return
+
+        if kind != "http.response.body":
+            self.error = "invalid server response"
+            return
+        self.saw_body = True
+        if self.error is not None:
+            return
+        raw_body = message.get("body", b"")
+        if not isinstance(raw_body, bytes | bytearray):
+            self.error = "invalid server response"
+            return
+        maximum = current_wire_response_limit(self.settings.max_response_bytes)
+        if len(self.body) + len(raw_body) > maximum:
+            self.body.clear()
+            self.error = "response exceeds configured wire limit"
+            return
+        self.body.extend(raw_body)
+
+    async def flush(self, send: Send) -> None:
+        if self.error is not None:
+            await _plain_response(send, 500, self.error)
+            return
+        if self.start is None:
+            await _plain_response(send, 500, "invalid server response")
+            return
+        maximum = current_wire_response_limit(self.settings.max_response_bytes)
+        if len(self.body) > maximum:
+            await _plain_response(send, 500, "response exceeds configured wire limit")
+            return
+        await send(self.start)
+        await send(
+            {
+                "type": "http.response.body",
+                "body": bytes(self.body),
+                "more_body": False,
+            }
+        )
+
+
 class HttpBoundaryMiddleware:
-    """Enforce HTTP host/origin/size/admission policy before MCP dispatch."""
+    """Enforce host/origin/size/admission policy before MCP dispatch.
+
+    The server intentionally runs FastMCP with ``json_response=True`` and
+    ``stateless_http=True``. Responses are therefore captured only up to the
+    configured wire limit, then emitted once their final size is proven.
+    """
 
     def __init__(self, app: ASGIApp, settings: Settings) -> None:
         self.app = app
@@ -163,10 +246,7 @@ class HttpBoundaryMiddleware:
             return
 
         host_values = _header_values(headers, b"host")
-        if len(host_values) != 1 or not _host_matches(
-            host_values[0],
-            self.settings.allowed_hosts,
-        ):
+        if len(host_values) != 1 or not _host_matches(host_values[0], self.settings.allowed_hosts):
             await _plain_response(send, 400, "host is not allowed")
             return
 
@@ -183,9 +263,8 @@ class HttpBoundaryMiddleware:
             await _plain_response(send, 400, "multiple content-length headers are not allowed")
             return
         if content_length_values:
-            content_length = content_length_values[0]
             try:
-                declared_length = int(content_length)
+                declared_length = int(content_length_values[0])
             except ValueError:
                 await _plain_response(send, 400, "invalid content-length")
                 return
@@ -193,57 +272,30 @@ class HttpBoundaryMiddleware:
                 await _plain_response(send, 413, "request body too large")
                 return
 
-        try:
-            body = await _buffer_request(receive, self.settings.http_max_body_bytes)
-        except ValueError:
-            await _plain_response(send, 413, "request body too large")
-            return
-        if body is None:
-            return
-
-        admitted = await self._admission.acquire()
+        admitted = await self._admission.acquire(self.settings.http_queue_wait_ms / 1000)
         if not admitted:
-            await _plain_response(send, 503, "request queue is full")
+            await _plain_response(send, 503, "request queue is full or wait deadline exceeded")
             return
-
-        token = _wire_response_limit.set(self.settings.max_response_bytes)
-        buffered: list[ASGIMessage] = []
-
-        async def buffer_send(message: ASGIMessage) -> None:
-            buffered.append(dict(message))
 
         try:
-            await self.app(scope, _replay_receive(body), buffer_send)
-            await self._flush_response(buffered, send)
+            try:
+                async with asyncio.timeout(self.settings.http_ingress_timeout_ms / 1000):
+                    body = await _buffer_request(receive, self.settings.http_max_body_bytes)
+            except TimeoutError:
+                await _plain_response(send, 408, "request body deadline exceeded")
+                return
+            except ValueError:
+                await _plain_response(send, 413, "request body too large")
+                return
+            if body is None:
+                return
+
+            token = _wire_response_limit.set(self.settings.max_response_bytes)
+            capture = _ResponseCapture(self.settings)
+            try:
+                await self.app(scope, _replay_receive(body), capture.send)
+                await capture.flush(send)
+            finally:
+                _wire_response_limit.reset(token)
         finally:
-            _wire_response_limit.reset(token)
             self._admission.release()
-
-    async def _flush_response(
-        self,
-        messages: list[ASGIMessage],
-        send: Send,
-    ) -> None:
-        starts = [message for message in messages if message.get("type") == "http.response.start"]
-        bodies = [message for message in messages if message.get("type") == "http.response.body"]
-        if len(starts) != 1:
-            await _plain_response(send, 500, "invalid server response")
-            return
-
-        response_headers = list(starts[0].get("headers") or [])
-        if _header_bytes(response_headers) > self.settings.http_max_header_bytes:
-            await _plain_response(send, 500, "response headers exceed configured limit")
-            return
-
-        wire_body = b"".join(message.get("body", b"") for message in bodies)
-        maximum = current_wire_response_limit(self.settings.max_response_bytes)
-        if len(wire_body) > maximum:
-            await _plain_response(send, 500, "response exceeds configured wire limit")
-            return
-
-        await send(starts[0])
-        if bodies:
-            for message in bodies:
-                await send(message)
-        else:
-            await send({"type": "http.response.body", "body": b"", "more_body": False})

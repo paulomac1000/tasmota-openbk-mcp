@@ -62,6 +62,18 @@ def normalize_legacy_result(value: Any) -> Any:
 
 _thread_limiter = anyio.CapacityLimiter(8)
 _TARGET_ARGUMENTS = ("target_id", "identifier", "ip_address", "ip")
+_fallback_settings: Settings | None = None
+
+
+def _settings_for_call() -> Settings:
+    from .policy import current_context
+
+    context = current_context()
+    if context is not None:
+        return context.settings
+    if _fallback_settings is None:
+        raise RuntimeError("legacy safety settings are not installed")
+    return _fallback_settings
 
 
 def _bind_authorized_target(
@@ -166,9 +178,38 @@ class LegacyTargetResolver:
             raise TargetNotFound("authorized target disappeared or became ambiguous")
         revalidate_binding(target, matches[0], self.settings)
 
+    async def readiness(self) -> dict[str, Any]:
+        from .targeting import TargetError, target_id_for
+
+        try:
+            devices = await asyncio.to_thread(self._devices)
+        except Exception as exc:
+            return {
+                "status": "unavailable",
+                "reason": f"registry-read-failed:{type(exc).__name__}",
+                "valid_targets": 0,
+            }
+        valid = 0
+        for record in devices:
+            try:
+                target_id_for(record)
+                validate_address(str(record.get("ip", "")), self.settings)
+            except TargetError:
+                continue
+            valid += 1
+        return {
+            "status": "ready" if valid else "unavailable",
+            "reason": "available" if valid else "no-valid-stable-targets",
+            "discovered_targets": len(devices),
+            "valid_targets": valid,
+        }
+
 
 def install_legacy_safety(settings: Settings) -> None:
     import importlib
+
+    global _fallback_settings
+    _fallback_settings = settings
 
     from tools import constants as legacy_constants
     from tools import iot_discovery
@@ -198,7 +239,7 @@ def install_legacy_safety(settings: Settings) -> None:
             if len(matches) != 1:
                 return None
             address = str(matches[0].get("ip", ""))
-            validate_address(address, settings)
+            validate_address(address, _settings_for_call())
             return matches[0]
 
         exact_find.__exact_target_wrapper__ = True  # type: ignore[attr-defined]
@@ -231,7 +272,7 @@ def install_legacy_safety(settings: Settings) -> None:
                 target = resolve_exact_target(
                     selector,
                     iot_discovery._get_cached_devices(),
-                    settings,
+                    _settings_for_call(),
                 )
                 return target.address
             except TargetNotFound:

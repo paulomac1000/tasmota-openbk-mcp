@@ -48,6 +48,8 @@ class TargetResolver(Protocol):
 
     async def revalidate(self, target: BoundTarget) -> None: ...
 
+    async def readiness(self) -> Mapping[str, Any]: ...
+
 
 def _normalized_identity_parts(device: Mapping[str, Any]) -> list[str]:
     parts: list[str] = []

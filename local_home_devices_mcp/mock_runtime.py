@@ -134,6 +134,9 @@ class MockTargetResolver:
         if target.target_id != "dev_mock_light" or target.fingerprint != "mock-fingerprint-v1":
             raise TargetNotFound("mock target binding changed")
 
+    async def readiness(self) -> dict[str, Any]:
+        return {"status": "ready", "valid_targets": 1, "source": "mock"}
+
 
 def run_mock_self_test(settings: Any) -> dict[str, Any]:
     """Run the deterministic zero-I/O governance workflow for smoke checks.

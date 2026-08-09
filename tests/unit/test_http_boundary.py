@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from typing import Any
 
@@ -139,3 +140,54 @@ async def test_exact_origin_and_host_reach_app() -> None:
         body=b"{}",
     )
     assert _status(messages) == 200
+
+
+@pytest.mark.asyncio
+async def test_queue_wait_is_bounded() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def app(scope, receive, send):
+        await receive()
+        started.set()
+        await release.wait()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    middleware = HttpBoundaryMiddleware(
+        app,
+        _settings(http_max_connections=1, http_queue_limit=1, http_queue_wait_ms=10),
+    )
+    first = asyncio.create_task(_invoke(middleware, headers=[(b"host", b"127.0.0.1")], body=b"{}"))
+    await started.wait()
+    second = await _invoke(
+        middleware,
+        headers=[(b"host", b"127.0.0.1")],
+        body=b"{}",
+    )
+    assert _status(second) == 503
+    release.set()
+    assert _status(await first) == 200
+
+
+@pytest.mark.asyncio
+async def test_ingress_body_read_has_deadline() -> None:
+    sent: list[dict[str, Any]] = []
+
+    async def app(scope, receive, send):
+        raise AssertionError("app must not run after ingress timeout")
+
+    async def receive() -> dict[str, Any]:
+        await asyncio.sleep(0.05)
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message: dict[str, Any]) -> None:
+        sent.append(message)
+
+    middleware = HttpBoundaryMiddleware(app, _settings(http_ingress_timeout_ms=10))
+    await middleware(
+        {"type": "http", "method": "POST", "path": "/mcp", "headers": [(b"host", b"127.0.0.1")]},
+        receive,
+        send,
+    )
+    assert _status(sent) == 408

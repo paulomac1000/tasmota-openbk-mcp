@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,6 @@ import pytest
 from scripts.lock_wheelhouse import lock_lines
 
 pytestmark = pytest.mark.unit
-
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -54,9 +54,21 @@ def test_container_installs_only_from_hash_locked_wheelhouse() -> None:
     assert "wheelhouse/" in workflow
 
 
-def test_release_version_matches_package_and_uses_protected_environment() -> None:
+def test_major_version_matches_breaking_contract() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    assert project["project"]["version"] == "2.0.0"
+
+
+def test_release_uses_quarantine_digest_and_non_executing_publisher() -> None:
     workflow = (ROOT / ".github/workflows/publish.yml").read_text(encoding="utf-8")
-    assert "environment: release" in workflow
-    assert 'tomllib.load(open("pyproject.toml", "rb"))' in workflow
-    assert 'test "${PACKAGE_VERSION}" = "${VERSION}"' in workflow
-    assert 'git checkout --detach "${REVISION}"' in workflow
+    validate, publisher = workflow.split("\n  publish:\n", 1)
+    assert "environment: release" in publisher
+    assert "MCP_QUARANTINE_REGISTRY" in validate
+    assert 'test "${QUARANTINE_REGISTRY,,}" != "ghcr.io"' in validate
+    assert "docker load" in validate
+    assert "Smoke-test exact quarantined registry digest" in validate
+    assert "docker buildx imagetools create" in publisher
+    assert "docker load" not in publisher
+    assert "docker run" not in publisher
+    assert "actions/checkout" not in publisher
+    assert "docker build " not in publisher

@@ -5,49 +5,37 @@ type: reference
 status: evolving
 rigor: operational
 owners: [repository-maintainers]
-verification: Run policy, target-binding, artifact, auth, and real-transport tests for the assessed revision.
+verification: Run policy, target-binding, artifact, HTTP-boundary, auth, and real-transport tests for the assessed revision.
 ---
 
 # Security model
 
 ## Trust boundary
 
-The MCP composition root owns authentication and the invocation gate. Adapter modules do not approve callers, choose fallback targets, or weaken operator policy.
+The MCP composition root owns authentication and the invocation gate. Legacy adapters do not approve callers, choose fallback targets, or weaken operator policy. Public calls carry the immutable `Settings` snapshot in invocation context; the legacy module-level write flag is a compatibility fallback only for direct adapter tests/scripts outside the governed path.
 
 ## HTTP authentication
 
-Loopback HTTP may serve anonymous read-only calls. A non-loopback bind is rejected unless authentication is configured and `MCP_TRUSTED_PROXY_TLS=1` confirms that a trusted reverse proxy terminates TLS. This flag does not create TLS; deployment owners must prove proxy and network configuration separately.
+All HTTP, including loopback HTTP, requires a configured identity provider. Static tokens are development/test-only and require `MCP_HTTP_DEVELOPMENT_MODE=1` (or mock mode). Production uses JWT/JWKS. A non-loopback bind additionally requires `MCP_TRUSTED_PROXY_TLS=1`; this acknowledges a separately verified TLS-terminating trusted proxy and does not create TLS itself.
 
-Static tokens are separated by role:
+Static development roles are separated into read, sensitive-read, write, dangerous, and admin tokens. Scope checks and stable-target ACLs remain server-side. Malformed scope/target claims fail closed.
 
-- read token: `devices:read`;
-- write token: read, sensitive read, and write;
-- admin token: `devices:admin`.
+## HTTP resource boundary
 
-Dangerous access is not granted to every valid token. Static verification remains suitable only for controlled environments; production should replace it with reviewed JWT/JWKS or introspection.
+Host and Origin policy run before dispatch. Connection admission occurs before request-body buffering. Queue wait and ingress-body read have explicit time limits; body/header sizes and concurrent connections are bounded. Stateless JSON responses are retained only up to the effective capability wire limit, so an oversized response cannot force unbounded response-memory accumulation.
 
 ## Target authorization
 
-For target-bearing tools, runtime order is:
-
-1. parse the local selector;
-2. authorize the capability and selector form;
-3. resolve an exact cached record to `BoundTarget`;
-4. use `BoundTarget.target_id` as the concurrency key;
-5. re-read the registry and revalidate address plus fingerprint;
-6. replace the model-supplied selector at the compatibility boundary with the authorized `BoundTarget.address`;
-7. invoke the adapter without a second registry lookup.
-
-Partial name matching and silent fallback are prohibited. Legacy adapters receive only the canonical authorized address. The compatibility resolver recognizes that address from invocation context and never switches to a newly matching cache record after revalidation.
+For target-bearing tools the order is selector normalization, capability/selector authorization, exact resolution within the authorized namespace, stable-target authorization, target-keyed concurrency admission, identity/address revalidation, then replacement of the model selector with the authorized address immediately before the legacy adapter call. Partial matching and silent fallback are prohibited.
 
 ## Blocking adapters and ambiguous outcomes
 
-Legacy synchronous adapters run through a bounded AnyIO worker pool. A client deadline cannot stop an already-running system call, so cancellation is shielded until the worker exits and the target lock remains owned for the entire physical operation. The client then receives an ambiguous-outcome timeout. Such mutations are not automatically retried and require reconciliation before a later attempt. Unverified mutations stay inactive.
+Synchronous legacy adapters run in a bounded AnyIO worker pool. Cancellation retains concurrency ownership until physical work stops. A timeout before mutation execution starts is `DEADLINE_EXCEEDED`; a timeout after mutation execution starts is `UNKNOWN_OUTCOME` and requires reconciliation before retry. Read operations never report mutation-unknown wording.
 
 ## Artifacts
 
-Artifacts use opaque 128-bit identifiers, server-owned paths, exclusive no-follow creation where supported, `0600` files, per-item and total quotas, expiry, integrity hashes, and principal ownership. The `artifact://<id>` resource is registered in mock and production compositions and requires sensitive or admin scope plus owner matching unless the caller is an administrator. Production device adapters are not yet all wired as artifact writers and must be migrated separately.
+Artifact roots reject existing symlink components. Artifacts use opaque 128-bit IDs, server-owned paths, exclusive no-follow data creation where supported, restrictive modes, quotas, expiry, integrity hashes, and owner checks. Readiness includes artifact-store accessibility.
 
 ## Privileged operations
 
-Docker socket access, caller-selected paths, firmware update, raw commands, factory reset, direct DPS mutation, and unbound OpenHASP writes remain disabled. Docker operations require a separately reviewed least-privileged sidecar before reactivation.
+Docker socket access, caller-selected paths, firmware update, raw commands, factory reset, direct DPS mutation, and unbound OpenHASP writes remain inactive until separately reviewed. Docker operations require a least-privileged sidecar; the MCP container must not mount `docker.sock`.

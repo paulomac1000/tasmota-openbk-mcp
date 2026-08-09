@@ -5,15 +5,19 @@ type: reference
 status: evolving
 rigor: operational
 owners: [repository-maintainers]
-verification: Run unit, adapter integration, real stdio, real Streamable HTTP, wheel, and container probes.
+verification: Run unit, adapter integration, real stdio, real Streamable HTTP, wheel, container, and dependency-readiness probes.
 ---
 
 # System architecture
 
-`server.py` loads immutable `Settings` and delegates to `local_home_devices_mcp.composition`. The composition root creates FastMCP, authentication, the target resolver, `OperationGate`, artifact storage, adapters, and official transports.
+`server.py` loads immutable `Settings` and delegates to `local_home_devices_mcp.composition`. The composition root creates FastMCP, authentication, the target resolver, `OperationGate`, artifact storage, adapters, and supported transports.
 
-For every tool call, middleware resolves the manifest, authenticates the principal, authorizes capability and confidentiality scopes, resolves a stable target when applicable, applies rate limits and a deadline, acquires an async lock keyed by stable target ID, revalidates identity, invokes the adapter, and maps typed failures to MCP errors.
+For every tool call, middleware authenticates the principal, authorizes capability and selector namespace, resolves and authorizes a stable target when applicable, applies a bounded principal rate limiter and absolute deadline, acquires concurrency ownership, revalidates identity, invokes the adapter, enforces the final response limit, and maps failures to stable machine-readable MCP error codes.
 
-Legacy adapters are registered through `LegacyRegistrationProxy`. It replaces model selectors with the authorized target address, wraps synchronous calls before schema registration, executes them in a bounded worker pool, retains the target lock until a cancelled worker actually exits, and converts JSON envelopes to typed outcomes. This is a migration boundary, not the target architecture.
+The HTTP boundary is separate from capability policy. It bounds connections, queue depth, queue wait, ingress read time, headers, body size, Host/Origin policy, and final buffered JSON response bytes before handing the request to FastMCP.
 
-Tests are split into direct adapter tests, invocation-kernel tests, and real protocol tests. Real protocol tests spawn the server over stdio or HTTP and use the official MCP client through initialize, list, call, and shutdown lifecycle.
+`LegacyRegistrationProxy` is a migration boundary. It replaces model selectors with the authorized address, wraps blocking calls in a bounded worker pool, retains ownership until cancelled physical work ends, and normalizes legacy envelopes. Global compatibility patches obtain Settings from the current invocation context so public calls are not bound to whichever server instance installed a patch first.
+
+`/ready` checks component registration plus target-registry and artifact-store dependency state. Registration count alone is not considered readiness.
+
+Candidate-local CI is not approval authority for itself. Final adoption/release acceptance is bound outside the assessed tree to one immutable SHA and exact artifact identities.

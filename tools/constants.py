@@ -22,14 +22,6 @@ MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "")
 START_IP = os.getenv("START_IP", "192.168.1.1")
 END_IP = os.getenv("END_IP", "192.168.1.254")
 NETWORK_RANGE = os.getenv("NETWORK_RANGE")
-MCP_SSE_PORT = int(os.getenv("MCP_SSE_PORT", "9101"))
-REST_API_PORT = int(os.getenv("REST_API_PORT", "9102"))
-
-# Streamable HTTP transport
-MCP_TRANSPORT = os.getenv("MCP_TRANSPORT", "both")  # streamable-http, sse, both
-MCP_ALLOWED_ORIGINS = os.getenv("MCP_ALLOWED_ORIGINS", "http://localhost:*")
-
-HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "9100"))
 OPENHASP_DEFAULT_HOST = os.getenv("OPENHASP_DEFAULT_HOST", "192.168.1.100")
 OPENHASP_HTTP_PORT = int(os.getenv("OPENHASP_HTTP_PORT", "80"))
 OPENHASP_TELNET_PORT = int(os.getenv("OPENHASP_TELNET_PORT", "23"))
@@ -57,20 +49,15 @@ TUYA_ACCESS_SECRET = os.getenv("TUYA_ACCESS_SECRET", "")
 TUYA_PROJECT_CODE = os.getenv("TUYA_PROJECT_CODE", "")
 TUYA_DEVICES_FILE = os.getenv("TUYA_DEVICES_FILE", "data/tuya_devices.json")
 
-BIND_HOST = os.getenv("BIND_HOST", "127.0.0.1")
-ALLOW_PUBLIC_BIND = os.getenv("MCP_UNSAFE_PUBLIC_ACCESS_CONFIRMED", "0") == "1"
-
-# Server-level write guard. Write and destructive tools are rejected before any
-# I/O unless this flag is explicitly enabled. This is a server-level authorization
-# gate decided by the operator - distinct from the per-tool `requires_confirmation`
-# manifest field, which is an agent-level user-consent hint.
+# Compatibility fallback for direct legacy-adapter tests and scripts. Public MCP
+# calls use the immutable Settings snapshot carried by InvocationContext instead.
 ENABLE_WRITE_OPERATIONS = os.getenv("ENABLE_WRITE_OPERATIONS", "0") == "1"
 
 # Build default network range for discovery (CIDR notation)
 _DEFAULT_OCTETS = START_IP.rsplit(".", 1)[0]
 DEFAULT_NETWORK_RANGE = NETWORK_RANGE or f"{_DEFAULT_OCTETS}.0/24"
 
-TOOLS_VERSION = "1.7.0"
+TOOLS_VERSION = "2.0.0"
 
 DEFAULT_HA_DISCOVERY_PREFIX = "homeassistant"
 
@@ -291,14 +278,26 @@ def get_logger(name: str) -> logging.Logger:
 
 
 def check_write_enabled() -> None:
-    """Raise ValidationError when server-level write operations are disabled.
+    """Fail closed unless the governed invocation or legacy fallback enables writes.
 
-    MUST be called at the start of every write/destructive tool wrapper, before
-    any I/O. See ENABLE_WRITE_OPERATIONS.
-
-    Raises:
-        ValidationError: If ENABLE_WRITE_OPERATIONS is not enabled.
+    Public MCP calls are authorized by ``OperationGate`` using the immutable
+    ``Settings`` snapshot. The module-level environment flag remains only for
+    direct legacy-adapter tests and scripts that do not run through the gate.
     """
+    try:
+        from local_home_devices_mcp.policy import current_context
+    except ImportError:
+        context = None
+    else:
+        context = current_context()
+
+    if context is not None:
+        if context.operation_kind not in {"write", "destructive"}:
+            raise ValidationError("legacy write guard reached from a non-mutating capability")
+        if not context.settings.write_enabled:
+            raise ValidationError("Write operations are disabled by operator policy.")
+        return
+
     if not ENABLE_WRITE_OPERATIONS:
         raise ValidationError(
             "Write operations are disabled. Set ENABLE_WRITE_OPERATIONS=1 on the server to enable."

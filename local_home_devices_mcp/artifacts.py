@@ -31,6 +31,15 @@ class ArtifactMetadata:
     expires_at: float
 
 
+def _reject_symlink_components(root: Path) -> None:
+    absolute = root.absolute()
+    current = Path(absolute.anchor)
+    for part in absolute.parts[1:]:
+        current /= part
+        if current.is_symlink():
+            raise ArtifactError(f"artifact root contains a symlink component: {current}")
+
+
 class ArtifactStore:
     def __init__(
         self,
@@ -40,6 +49,7 @@ class ArtifactStore:
         max_store_bytes: int,
         retention_seconds: int,
     ) -> None:
+        _reject_symlink_components(root)
         self.root = root.resolve()
         self.max_artifact_bytes = max_artifact_bytes
         self.max_store_bytes = max_store_bytes
@@ -48,6 +58,21 @@ class ArtifactStore:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with contextlib.suppress(OSError):
             os.chmod(self.root, 0o700)
+
+    def readiness(self) -> dict[str, object]:
+        try:
+            metadata = self.root.stat()
+        except OSError as exc:
+            return {"status": "unavailable", "reason": type(exc).__name__}
+        if not self.root.is_dir():
+            return {"status": "unavailable", "reason": "root-is-not-directory"}
+        if not os.access(self.root, os.R_OK | os.W_OK):
+            return {"status": "unavailable", "reason": "root-is-not-readable-writable"}
+        return {
+            "status": "ready",
+            "mode": oct(metadata.st_mode & 0o777),
+            "root": str(self.root),
+        }
 
     def _paths(self, artifact_id: str) -> tuple[Path, Path]:
         if not artifact_id.startswith("art_") or not artifact_id[4:].isalnum():

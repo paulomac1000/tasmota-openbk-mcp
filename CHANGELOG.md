@@ -1,31 +1,28 @@
 # Changelog
 
-## [1.7.0] — 2026-08-09
+## [2.0.0] — 2026-08-09
+
+### Breaking
+- Removed legacy SSE and custom REST/JSON-RPC execution surfaces; supported transports are stdio and Streamable HTTP.
+- Public legacy JSON-string success/error semantics are replaced by typed data and MCP tool errors.
+- Target selection is exact and authorization-bound with no silent fallback; retry/timeout behavior is now fail-closed with explicit unknown outcomes. These semantic changes require a major version.
 
 ### Added
-- **ai-skills compliance migration completed and verified against real hardware.** This branch adopts the `mcp-server-architect` 1.2.0 contract from the `ai-skills` `fix/unified-contract-release-hardening` revision and is now tested end-to-end: full local gate (865 tests), exact-wheel install, real stdio and Streamable HTTP probes, a locally built Docker image, and a live deployment in the `ha-mcp-stack` replacing the previous v1.6.0 container. **Hosted CI is fully green** (quality, test, exact-wheel, and container jobs) on the exact pushed revision.
+- Application-owned policy kernel with stable target authorization/revalidation, bounded concurrency, principal ACLs, governed artifacts, and dependency-aware readiness.
+- Bounded HTTP connection admission, queue wait, ingress read, headers/body limits, Host/Origin checks, and bounded final response capture.
+- Stable public error codes with `retryable` and `unknown_outcome` fields.
+- Isolated-quarantine registry release flow that promotes only a smoke-tested registry digest in the protected publisher.
 
 ### Fixed
-- **FastMCP 3.4.6 API migration**: `stateless_http`/`json_response` moved from the `FastMCP()` constructor to `http_app()`; the `/ready` probe now uses `list_tools(run_middleware=False)` and `list_resource_templates(run_middleware=False)`; `mcp.get_tools()` replaced with the 3.4.6 `list_tools()` API.
-- **Legacy tool output schemas**: legacy tools annotated `-> str` for JSON envelopes now register with `output_schema=None`, so the compatibility wrapper can return typed data that passes official-client schema validation (previously every real-device call failed client-side validation).
-- **Mock concurrency contract**: mock manifests declared inconsistent per-target concurrency limits (4 vs 1 on the same target key), which made concurrent calls fail with "concurrency contract changed"; unified to limit 1 to match the real manifests.
-- **Readiness endpoint**: `registered_tools` was always 0 (auth middleware filtered the probe); now bypasses client-auth filtering so operator health checks observe the full catalog.
-- **Docker build pipeline**: corrected the pinned `python:3.13.5-slim` base-image digest (was invalid), fixed `COPY dist/*.whl` so the wheel lands in a directory (wildcard destination), and removed `dist/` from `.dockerignore` so the exact wheel is present in the build context.
-- **Device data path**: `tools/iot_discovery.py` now honors `IOT_DATA_PATH` instead of deriving `data/` from the source-tree location, so the wheel-installed container reads the mounted `/app/data/discovered_devices.json` (previously `Permission denied` in the container).
-- **Hikvision motion config parser**: `columnGranularity`/`rowGranularity` may be a plain integer (`22`) on real devices, not always `22x22`; the parser no longer crashes and the mock now uses the real payload shape.
-- **Test isolation**: removed the stale fastmcp MagicMock injection in `tests/unit/conftest.py` (fastmcp 2.x-era hack that poisoned in-memory fastmcp tests), restored `_find_device_by_identifier` after `install_legacy_safety` in compliance tests, and prevented the container-only `IOT_DATA_PATH=/app` value from leaking into local test runs.
-- **Stale tests aligned with the migrated implementation**: `test_mock_runtime` (new `run_mock_self_test` contract), `test_fastmcp_protocol`/`test_server_api` (real stdio subprocess instead of in-memory `Client(mcp)`), `test_real_transports` (corrected exception assertion + generous startup wait), `test_registration_coverage` (Docker-gated subset), `test_real_tools` (accepts OpenBK devices, which dominate this network), `test_policy`/`test_canonical_contract` (reviewed manifest classification), `test_release_and_image_contract` (new Dockerfile layout).
-- **Quality gates**: full `ruff check .` and `ruff format` clean (256 errors fixed), `mypy local_home_devices_mcp` clean (66 errors fixed; documented per-module overrides for the stub-less tinytuya/defusedxml/paho adapters), `compileall` clean, `bandit -r local_home_devices_mcp tools -ll` reports no Medium/High issues.
-- **Hosted CI compliance gates**: added `types-requests`/`types-defusedxml` to dev extras (mypy failed in CI without them), export only runtime-active manifests for the ai-skills capability-manifest validator, `status: accepted` → `active` in decision 0002 for the AFDS validator, added the required `concurrency` mapping to `auto-tag.yml`, and audit AGENTS instructions on a clean staging copy so the vendored `.standards` checkout no longer trips the single-layout mcp-server profile.
+- Rate-limiter principal registry now has bounded cardinality and expiry cleanup.
+- Public MCP calls use the invocation's immutable Settings for the legacy write guard and safety target wrappers rather than stale first-import/first-install server state.
+- Release publishing no longer loads or executes candidate image bytes in the privileged job.
+- Repository diagnostic validation is pinned to ai-skills revision `b54fc6b27ea80b36a70d5de73445970e17f55789`.
 
-### Changed
-- `pyproject.toml` version pinned to `1.7.0` (was `2.0.0` on this branch).
-- `TOOLS_VERSION` bumped from `1.6.0` to `1.7.0` (`tools/constants.py`) and `tools/__init__.py` `__version__` synced to `1.7.0`.
-- `mock_runtime.run_mock_self_test(settings)` extracted as the single self-test implementation shared by `server.py --mock-self-test` and integration tests.
-- `.gitignore` restores `.omo/` and ignores the CI-generated exact-artifact outputs (`requirements.lock`, `wheelhouse/`, `locks/`).
-
-### Deployment
-- `ha-mcp-stack` service `local-home-devices-mcp` upgraded to the locally built `local-home-devices-mcp:agent-refactor` image (Streamable HTTP on 9102, loopback bind, scoped static tokens, no Docker-socket mount); container reports `status: ready`, 61 registered tools, 68 governed components, and serves 47 real discovered devices (OpenBK/Tasmota/Tuya/OpenHASP) with working device info, WiFi config, and power reads through the official MCP client.
+### Verification status
+- Candidate-local quality, tests, exact wheel, and container CI must pass on the final 2.0.0 SHA after these changes.
+- Previous real-device observations were made on an earlier candidate and are not acceptance evidence for the new SHA. Re-run `tests/real_system_todos.py` on the final deployed image.
+- Provider-backed external acceptance and independent review remain required before claiming ai-skills adoption approval.
 
 ## [1.6.0] — 2026-06-07
 

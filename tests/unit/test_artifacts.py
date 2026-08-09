@@ -64,3 +64,21 @@ def test_read_is_owner_bound(tmp_path: Path):
     metadata, content = store.read(artifact.artifact_id, requester_subject="alice")
     assert metadata.artifact_id == artifact.artifact_id
     assert content == b"secret"
+
+
+def test_store_rejects_symlink_root_component(tmp_path: Path) -> None:
+    real = tmp_path / "real-artifacts"
+    real.mkdir()
+    linked = tmp_path / "linked-artifacts"
+    linked.symlink_to(real, target_is_directory=True)
+    with pytest.raises(ArtifactError, match="symlink component"):
+        ArtifactStore(
+            linked,
+            max_artifact_bytes=100,
+            max_store_bytes=200,
+            retention_seconds=3600,
+        )
+
+
+def test_store_readiness_reports_accessible_root(tmp_path: Path) -> None:
+    assert _store(tmp_path).readiness()["status"] == "ready"
