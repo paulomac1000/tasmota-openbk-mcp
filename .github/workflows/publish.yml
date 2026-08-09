@@ -5,12 +5,8 @@ on:
     tags: ["v*"]
   workflow_dispatch:
     inputs:
-      version:
-        description: Version to publish, without v prefix
-        required: true
-        type: string
-      revision:
-        description: Exact tested main commit SHA
+      release_ref:
+        description: Existing v* tag or full 40-character main-reachable commit SHA
         required: true
         type: string
 
@@ -19,91 +15,136 @@ permissions:
   actions: read
 
 concurrency:
-  group: release-${{ github.ref }}-${{ inputs.revision || github.sha }}
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
   cancel-in-progress: false
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 25
     outputs:
-      version: ${{ steps.release.outputs.version }}
       revision: ${{ steps.release.outputs.revision }}
+      version: ${{ steps.release.outputs.version }}
+      release_tag: ${{ steps.release.outputs.release_tag }}
+      quarantine_ref: ${{ steps.quarantine.outputs.ref }}
+      quarantine_digest: ${{ steps.quarantine.outputs.digest }}
     steps:
-      - name: Check out source only in read-only validation job
+      - name: Check out source only in unprivileged validation job
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Resolve version and immutable revision
+      - name: Resolve immutable release identity
         id: release
         env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_REVISION: ${{ inputs.revision }}
+          REQUESTED_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.release_ref || github.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF_NAME: ${{ github.ref_name }}
         run: |
-          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
-            VERSION="${GITHUB_REF_NAME#v}"
-            REVISION="$(git rev-list -n 1 "${GITHUB_REF_NAME}")"
-          else
-            VERSION="${INPUT_VERSION}"
-            REVISION="${INPUT_REVISION}"
+          set -euo pipefail
+          requested="$REQUESTED_REF"
+          release_tag=""
+          if [[ "$EVENT_NAME" == "push" ]]; then
+            release_tag="$EVENT_REF_NAME"
+            requested="refs/tags/$release_tag"
           fi
-          [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "${REVISION}" =~ ^[0-9a-f]{40}$ ]]
-          git merge-base --is-ancestor "${REVISION}" origin/main
-          git checkout --detach "${REVISION}"
-          PACKAGE_VERSION="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-          test "${PACKAGE_VERSION}" = "${VERSION}"
-          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
-          echo "revision=${REVISION}" >> "${GITHUB_OUTPUT}"
+          if [[ "$requested" =~ ^[0-9a-f]{40}$ ]]; then
+            revision="$requested"
+          else
+            case "$requested" in
+              refs/tags/v*) release_tag="${requested#refs/tags/}" ;;
+              v*) release_tag="$requested" ;;
+              *) echo "release_ref must be an existing v* tag or full SHA" >&2; exit 1 ;;
+            esac
+            git show-ref --verify --quiet "refs/tags/$release_tag"
+            revision="$(git rev-parse "refs/tags/$release_tag^{commit}")"
+          fi
+          [[ "$revision" =~ ^[0-9a-f]{40}$ ]]
+          git cat-file -e "$revision^{commit}"
+          git merge-base --is-ancestor "$revision" origin/main
+          git checkout --detach "$revision"
+          test "$(git rev-parse HEAD)" = "$revision"
+          version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          if [[ -n "$release_tag" ]]; then
+            test "$release_tag" = "v$version"
+            test "$(git rev-parse "refs/tags/$release_tag^{commit}")" = "$revision"
+          fi
+          echo "revision=$revision" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
       - name: Locate successful CI for exact revision
         id: ci
         env:
           GH_TOKEN: ${{ github.token }}
           REVISION: ${{ steps.release.outputs.revision }}
         run: |
-          RUN_ID="$(gh run list --workflow CI --commit "${REVISION}" --status success \
-            --json databaseId,headSha --jq ".[] | select(.headSha == \"${REVISION}\") | .databaseId" | head -n 1)"
-          test -n "${RUN_ID}" && test "${RUN_ID}" != "null"
-          echo "run_id=${RUN_ID}" >> "${GITHUB_OUTPUT}"
+          set -euo pipefail
+          RUN_ID="$(gh run list --workflow CI --commit "$REVISION" --status success \
+            --json databaseId,headSha --jq ".[] | select(.headSha == \"$REVISION\") | .databaseId" | head -n 1)"
+          test -n "$RUN_ID" && test "$RUN_ID" != "null"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
       - name: Download exact image from successful CI
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: image-${{ steps.release.outputs.revision }}
           run-id: ${{ steps.ci.outputs.run_id }}
           github-token: ${{ github.token }}
-      - name: Verify closed image and exact revision metadata
+      - name: Verify and smoke-test exact CI image in unprivileged job
         env:
           REVISION: ${{ steps.release.outputs.revision }}
         run: |
+          set -euo pipefail
           sha256sum --check image.tar.gz.sha256
-          test "$(sed -n 's/^revision=//p' image-metadata.txt)" = "${REVISION}"
+          test "$(sed -n 's/^revision=//p' image-metadata.txt)" = "$REVISION"
           gzip -dc image.tar.gz | docker load
-          docker image inspect "local-home-devices-mcp:${REVISION}" >/dev/null
+          docker image inspect "local-home-devices-mcp:$REVISION" >/dev/null
           docker run --rm \
             -e MCP_MOCK_MODE=1 -e MCP_TRANSPORT=stdio \
             -e ENABLE_WRITE_OPERATIONS=1 \
-            "local-home-devices-mcp:${REVISION}" --mock-self-test
-      - name: Record validated release metadata
+            "local-home-devices-mcp:$REVISION" --mock-self-test
+      - name: Validate isolated quarantine registry configuration
         env:
-          VERSION: ${{ steps.release.outputs.version }}
-          REVISION: ${{ steps.release.outputs.revision }}
-          CI_RUN_ID: ${{ steps.ci.outputs.run_id }}
+          QUARANTINE_REGISTRY: ${{ vars.MCP_QUARANTINE_REGISTRY }}
+          QUARANTINE_REPOSITORY: ${{ vars.MCP_QUARANTINE_REPOSITORY }}
         run: |
-          printf 'version=%s\nrevision=%s\nci_run_id=%s\n' \
-            "${VERSION}" "${REVISION}" "${CI_RUN_ID}" > release-metadata.txt
-          cat image.tar.gz.sha256 >> release-metadata.txt
-      - name: Seal validated release bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+          set -euo pipefail
+          test -n "$QUARANTINE_REGISTRY"
+          test -n "$QUARANTINE_REPOSITORY"
+          test "${QUARANTINE_REGISTRY,,}" != "ghcr.io"
+      - name: Log in only to isolated quarantine registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
-          name: release-bundle-${{ steps.release.outputs.revision }}
-          path: |
-            image.tar.gz
-            image.tar.gz.sha256
-            image-metadata.txt
-            release-metadata.txt
-          if-no-files-found: error
-          retention-days: 7
+          registry: ${{ vars.MCP_QUARANTINE_REGISTRY }}
+          username: ${{ secrets.MCP_QUARANTINE_USERNAME }}
+          password: ${{ secrets.MCP_QUARANTINE_TOKEN }}
+      - name: Push and resolve exact quarantine digest
+        id: quarantine
+        env:
+          QUARANTINE_REGISTRY: ${{ vars.MCP_QUARANTINE_REGISTRY }}
+          QUARANTINE_REPOSITORY: ${{ vars.MCP_QUARANTINE_REPOSITORY }}
+          REVISION: ${{ steps.release.outputs.revision }}
+        run: |
+          set -euo pipefail
+          quarantine_ref="$QUARANTINE_REGISTRY/$QUARANTINE_REPOSITORY:sha-$REVISION"
+          docker tag "local-home-devices-mcp:$REVISION" "$quarantine_ref"
+          docker push "$quarantine_ref"
+          digest="$(docker buildx imagetools inspect "$quarantine_ref" --format '{{.Manifest.Digest}}')"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "ref=$quarantine_ref" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+      - name: Smoke-test exact quarantined registry digest
+        env:
+          QUARANTINE_REF: ${{ steps.quarantine.outputs.ref }}
+          QUARANTINE_DIGEST: ${{ steps.quarantine.outputs.digest }}
+        run: |
+          set -euo pipefail
+          source_ref="${QUARANTINE_REF%:*}@$QUARANTINE_DIGEST"
+          docker pull "$source_ref"
+          docker run --rm \
+            -e MCP_MOCK_MODE=1 -e MCP_TRANSPORT=stdio \
+            -e ENABLE_WRITE_OPERATIONS=1 \
+            "$source_ref" --mock-self-test
 
   publish:
     needs: validate
@@ -116,45 +157,49 @@ jobs:
       attestations: write
       id-token: write
     steps:
-      - name: Download only the closed validated release bundle
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      - name: Set up registry-to-registry promotion tooling
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v3
+      - name: Log in read-only to quarantine registry
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
-          name: release-bundle-${{ needs.validate.outputs.revision }}
-      - name: Verify sealed bundle without executing candidate source
-        env:
-          VERSION: ${{ needs.validate.outputs.version }}
-          REVISION: ${{ needs.validate.outputs.revision }}
-        run: |
-          sha256sum --check image.tar.gz.sha256
-          test "$(sed -n 's/^version=//p' release-metadata.txt)" = "${VERSION}"
-          test "$(sed -n 's/^revision=//p' release-metadata.txt)" = "${REVISION}"
-          gzip -dc image.tar.gz | docker load
-          docker image inspect "local-home-devices-mcp:${REVISION}" >/dev/null
-      - name: Log in to GHCR
+          registry: ${{ vars.MCP_QUARANTINE_REGISTRY }}
+          username: ${{ secrets.MCP_QUARANTINE_READ_USERNAME }}
+          password: ${{ secrets.MCP_QUARANTINE_READ_TOKEN }}
+      - name: Log in to production GHCR
         uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Publish tested bytes and immutable digest
-        id: push
+      - name: Promote exact tested digest without checkout, load, build, or execution
+        id: promote
         env:
-          VERSION: ${{ needs.validate.outputs.version }}
+          QUARANTINE_REF: ${{ needs.validate.outputs.quarantine_ref }}
+          EXPECTED_DIGEST: ${{ needs.validate.outputs.quarantine_digest }}
           REVISION: ${{ needs.validate.outputs.revision }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
         run: |
-          REPOSITORY="ghcr.io/${GITHUB_REPOSITORY,,}"
-          SHA_TAG="${REPOSITORY}:sha-${REVISION}"
-          docker tag "local-home-devices-mcp:${REVISION}" "${SHA_TAG}"
-          docker push "${SHA_TAG}"
-          IDENTITY="$(docker inspect --format='{{index .RepoDigests 0}}' "${SHA_TAG}")"
-          [[ "${IDENTITY}" =~ @sha256:[0-9a-f]{64}$ ]]
-          docker buildx imagetools create --tag "${REPOSITORY}:${VERSION}" "${IDENTITY}"
-          docker buildx imagetools create --tag "${REPOSITORY}:latest" "${IDENTITY}"
-          echo "subject_name=${IDENTITY%@*}" >> "${GITHUB_OUTPUT}"
-          echo "digest=${IDENTITY#*@}" >> "${GITHUB_OUTPUT}"
-      - name: Attest published immutable image
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+          set -euo pipefail
+          [[ "$EXPECTED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}"
+          source_ref="${QUARANTINE_REF%:*}@$EXPECTED_DIGEST"
+          immutable_ref="$repository:sha-$REVISION"
+          docker buildx imagetools create --tag "$immutable_ref" "$source_ref"
+          test "$(docker buildx imagetools inspect "$immutable_ref" --format '{{.Manifest.Digest}}')" = "$EXPECTED_DIGEST"
+          if [[ -n "$RELEASE_TAG" ]]; then
+            version_ref="$repository:$VERSION"
+            latest_ref="$repository:latest"
+            docker buildx imagetools create --tag "$version_ref" "$source_ref"
+            docker buildx imagetools create --tag "$latest_ref" "$source_ref"
+            test "$(docker buildx imagetools inspect "$version_ref" --format '{{.Manifest.Digest}}')" = "$EXPECTED_DIGEST"
+            test "$(docker buildx imagetools inspect "$latest_ref" --format '{{.Manifest.Digest}}')" = "$EXPECTED_DIGEST"
+          fi
+          echo "subject_name=$repository" >> "$GITHUB_OUTPUT"
+          echo "digest=$EXPECTED_DIGEST" >> "$GITHUB_OUTPUT"
+      - name: Attest promoted immutable image
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v3
         with:
-          subject-name: ${{ steps.push.outputs.subject_name }}
-          subject-digest: ${{ steps.push.outputs.digest }}
+          subject-name: ${{ steps.promote.outputs.subject_name }}
+          subject-digest: ${{ steps.promote.outputs.digest }}
           push-to-registry: true
