@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Export the complete canonical capability catalog for schema validation."""
+"""Export the canonical capability catalog for schema validation."""
 
 from __future__ import annotations
 
@@ -8,7 +8,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from local_home_devices_mcp.manifests import ARTIFACT_READ_MANIFEST, normalize_catalog
+from local_home_devices_mcp.manifests import (
+    ARTIFACT_READ_MANIFEST,
+    is_runtime_active,
+    normalize_catalog,
+)
 
 
 def _catalog(mock: bool) -> dict[str, dict[str, Any]]:
@@ -25,12 +29,20 @@ def _catalog(mock: bool) -> dict[str, dict[str, Any]]:
 
 
 def export(output: Path, *, mock: bool) -> list[Path]:
-    """Export every supported canonical manifest, including inactive entries."""
+    """Export the runtime-active capability catalog.
+
+    The ai-skills manifest validator requires every exported manifest to be
+    registered or invoked, so inactive entries are excluded here. Inactive
+    manifests remain schema-validated by the unit gate, which runs the full
+    catalog through ``normalize_catalog``.
+    """
     output.mkdir(parents=True, exist_ok=True)
     if output.is_symlink():
         raise ValueError("output directory must not be a symlink")
     paths: list[Path] = []
     for capability_id, manifest in sorted(_catalog(mock).items()):
+        if not is_runtime_active(manifest):
+            continue
         path = output / f"{capability_id}.json"
         path.write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
